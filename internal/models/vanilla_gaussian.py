@@ -17,6 +17,7 @@ from internal.utils.general_utils import (
 )
 from internal.optimizers import OptimizerConfig, Adam, SelectiveAdam, SparseGaussianAdam
 from internal.schedulers import Scheduler, ExponentialDecayScheduler
+# from internal.renderers.ciga_renderer import CigaRenderer
 
 
 @dataclass
@@ -50,6 +51,10 @@ class OptimizationConfig:
 
     optimizer: OptimizerConfig = field(default_factory=lambda: {"class_path": "Adam"})
 
+
+@dataclass
+class InferenceConfig:
+    lut_switch_step: Optional[int] = 2500
 
 @dataclass
 class VanillaGaussian(Gaussian):
@@ -288,7 +293,24 @@ class VanillaGaussianModel(
         for i in l:
             print("  {}={}".format(i["name"], i["lr"]))
 
-        return [means_optimizer, constant_lr_optimizer], [means_scheduler]
+        #return [means_optimizer, constant_lr_optimizer], [means_scheduler]
+
+        gate_optimizer = None
+        gate_lr = getattr(self.config.optimization, "adaptive_sh_lr", 1e-3)  # YAML에 넣어둔 값
+        renderer = getattr(self, "renderer", None) or getattr(module, "renderer", None)
+        gate_params = []
+        if renderer is not None and hasattr(renderer, "get_adaptive_parameters"):
+            gate_params = list(renderer.get_adaptive_parameters())
+
+        if len(gate_params) > 0:
+            gate_optimizer = torch.optim.Adam([{"name": "gate_mlp", "params": gate_params}], lr=gate_lr)
+            self._add_optimizer_after_backward_hook_if_available(gate_optimizer, module)
+            print(f"  gate_mlp={gate_lr}")
+
+        optimizers = [means_optimizer, constant_lr_optimizer]
+        if gate_optimizer is not None:
+            optimizers.append(gate_optimizer)
+        return optimizers, [means_scheduler]
 
     def get_property_names(self) -> Tuple[str, ...]:
         return self._names
@@ -300,6 +322,22 @@ class VanillaGaussianModel(
         if self._active_sh_degree >= self.config.sh_degree:
             return
         self._active_sh_degree += 1
+
+        lut_cfg = getattr(self.config, "inference", None)
+        lut_switch_step = None
+        if lut_cfg is not None:
+            lut_switch_step = getattr(lut_cfg, "lut_switch_step", None)
+
+        if lut_switch_step is None:
+            return
+
+        if step >= lut_switch_step and not getattr(self, "_lut_switched", False):
+            renderer = getattr(self, "renderer", None) or getattr(module, "renderer", None)
+            if renderer is not None and hasattr(renderer, "switch_to_lut_during_training"):
+                renderer.switch_to_lut_during_training(global_step=step)
+                self._lut_switched = True
+                if hasattr(module, "log"):
+                    module.log("info/lut_switched_at", float(step))
 
     # define properties by getters and setters
 

@@ -52,6 +52,8 @@ class CigaRenderer(Renderer):
 
         
         self.use_adaptive_sh = True
+        self.use_lut_during_train = False  
+        self.lut_switched_at_step = None
         self.MLP_mode = "visible"  # ["visible", "all"]
         self.d_low = 0.2
         self.d_high = 80.0  #5.0
@@ -245,55 +247,38 @@ class CigaRenderer(Renderer):
         #shs = self.shs_weight_MLP(rasterizer, shs, means3D, L=pc.max_sh_degree)
         if shs is not None and shs.shape[1] != 3:
             shs = shs.transpose(1, 2)
-        
-        # if self.use_adaptive_sh and shs is not None:
-        #             shs = self.apply_adaptive_weights(
-        #                 rasterizer, shs, means3D, 
-        #                 viewpoint_camera.camera_center,
-        #                 L=pc.max_sh_degree
-        #             )
-
-        if self.use_adaptive_sh and shs is not None:
-            shs, sh_weights, distances, nadir_angles = self.apply_adaptive_weights(
-                rasterizer, shs, means3D, viewpoint_camera.camera_center,
-                L=pc.max_sh_degree, return_aux=True
-            )
-            extra = dict(sh_weights=sh_weights, distances=distances, nadir_angles=nadir_angles)
-        else:
-            extra = {}
-
+            
 
         # Rasterize visible Gaussians to image, obtain their radii (on screen).
 
-        rendered_image, radii = rasterizer(
-
-            means3D=means3D,
-
-            means2D=means2D,
-
-            shs=shs,
-
-            colors_precomp=colors_precomp,
-
-            opacities=opacity,
-
-            scales=scales,
-
-            rotations=rotations,
-
-            cov3D_precomp=cov3D_precomp,
-
-        )
+       
 
         
         extra = {}
         if self.use_adaptive_sh and shs is not None:
             shs, sh_weights, distances, nadir_angles = self.apply_adaptive_weights(rasterizer, shs, means3D, viewpoint_camera.camera_center,
-        L=pc.active_sh_degree,   # 혹은 shs에서 유추하도록 apply 내부를 바꾸면 이 줄은 L 생략
-        return_aux=True)
+        L=pc.active_sh_degree, return_aux=True)
             extra.update(dict(sh_weights=sh_weights, distances=distances, nadir_angles=nadir_angles))
-        
 
+        rendered_image, radii = rasterizer(
+
+                    means3D=means3D,
+
+                    means2D=means2D,
+
+                    shs=shs,
+
+                    colors_precomp=colors_precomp,
+
+                    opacities=opacity,
+
+                    scales=scales,
+
+                    rotations=rotations,
+
+                    cov3D_precomp=cov3D_precomp,
+
+                )
 
         # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
 
@@ -347,17 +332,27 @@ class CigaRenderer(Renderer):
         v = phi_to_v(nadir_angles)
         
  
-        if self.training:
+        # if self.training:
+        #     uv = torch.stack([u, v], dim=-1)
+        #     sh_weights_vis = self.MLP(uv)
+        #     self._step += 1
+        #     if self._step % self.lut_update_every == 0:
+        #         with torch.no_grad():
+        #             self.LUT.update_from_mlp(self.MLP, self.grid_u, self.grid_v)
+        # else:
+        #     sh_weights_vis = self.LUT.lookup(u, v)
+
+        if (not self.training) or getattr(self, "use_lut_during_train", False):
+            sh_weights_vis = self.LUT.lookup(u, v)
+        else:
+
             uv = torch.stack([u, v], dim=-1)
             sh_weights_vis = self.MLP(uv)
             self._step += 1
             if self._step % self.lut_update_every == 0:
                 with torch.no_grad():
                     self.LUT.update_from_mlp(self.MLP, self.grid_u, self.grid_v)
-                
-            
-        else:
-            sh_weights_vis = self.LUT.lookup(u, v)
+
         
 
         sh_weights = torch.ones(N, L + 1, device=device, dtype=dtype)
@@ -546,6 +541,25 @@ class CigaRenderer(Renderer):
             "depth": RendererOutputInfo("depth", RendererOutputTypes.GRAY),
 
         }
+
+
+    def get_adaptive_parameters(self):
+        
+        if not getattr(self, "use_adaptive_sh", False):
+            return []
+       
+        if not hasattr(self, "MLP"):
+            return []
+        return list(self.MLP.parameters())
+
+    def switch_to_lut_during_training(self, global_step: int = None):
+        # 최신 MLP로 LUT를 한 번 갱신한 뒤, 학습 중에도 LUT를 쓰도록 플래그 ON
+        if hasattr(self, "LUT") and hasattr(self, "MLP") and hasattr(self, "grid_u") and hasattr(self, "grid_v"):
+            with torch.no_grad():
+                self.LUT.update_from_mlp(self.MLP, self.grid_u, self.grid_v)
+
+        self.use_lut_during_train = True
+        self.lut_switched_at_step = int(global_step) if global_step is not None else None
 
 
 
