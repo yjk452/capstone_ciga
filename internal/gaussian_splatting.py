@@ -32,6 +32,9 @@ from jsonargparse import lazy_instance
 from internal.utils.sh_utils import eval_sh
 from internal.utils.graphics_utils import store_ply
 
+#ciga
+from internal.models.ciga_mlp import CigaMLP
+from log import print_to, log_weight_stats
 
 class GaussianSplatting(LightningModule):
     def __init__(
@@ -55,6 +58,7 @@ class GaussianSplatting(LightningModule):
             initialize_from: str = None,
             overwrite_config: bool = True,
             renderer_output_types: Optional[List[str]] = None,
+            mlp_cfg : Dict[str, Any] = None
     ) -> None:
         super().__init__()
         self.automatic_optimization = False
@@ -63,6 +67,27 @@ class GaussianSplatting(LightningModule):
         # setup models
         self.gaussian_model = gaussian.instantiate()
         self.frozen_gaussians = None
+        
+        self.mlp_cfg = self.hparams['mlp_cfg']
+
+        # setup MLP
+        self.mlp = bool(self.mlp_cfg.get('use', False))
+        self.sch = bool(self.mlp_cfg.get('sch', False))
+        self.mlp_options = {
+            'mlp_lr' : float(self.mlp_cfg.get('lr', 5e-3)),
+            'mlp_weight_decay' : float(self.mlp_cfg.get('weight_decay', 0.0)), 
+            'mlp_milestones' : self.mlp_cfg.get('milestones', []),
+            'mlp_gamma' : float(self.mlp_cfg.get('gamma', 0.5)),    
+        }
+
+        if self.mlp:
+            self.mlp_model = CigaMLP.instantiate(
+                in_features=7,
+                sh_max_degree = self.gaussian_model.get_max_sh_degree()
+            )
+        else: 
+            self.mlp_model = None
+
 
         self.light_gaussian_hparams = light_gaussian
 
@@ -97,7 +122,7 @@ class GaussianSplatting(LightningModule):
         self.image_saving_threads = []
 
         self.val_metrics: List[Tuple[str, Dict]] = []
-
+        
         # hooks
         self.on_train_start_hooks: List[Callable[[GaussianModel, Self], None]] = []
         self.on_after_backward_hooks: List[Callable[[Dict, Any, GaussianModel, int, Self], None]] = []
@@ -176,6 +201,11 @@ class GaussianSplatting(LightningModule):
         self.renderer.setup(stage=stage, lightning_module=self)
         self.metric.setup(stage=stage, pl_module=self)
         self.density_controller.setup(stage=stage, pl_module=self)
+
+        if self.mlp:
+            self.renderer.set_mlp(self.mlp_model)
+        else:
+            self.renderer.set_mlp(None)
 
         # use different image log method based on the logger type
         self.log_image = None
@@ -343,6 +373,7 @@ class GaussianSplatting(LightningModule):
 
         # get optimizers and schedulers
         optimizers = self.optimizers()
+
         schedulers = self.lr_schedulers()
 
         # zero grad
@@ -378,6 +409,9 @@ class GaussianSplatting(LightningModule):
                 metrics_to_log,
                 step=self.trainer.global_step,
             )
+
+        #if self.trainer.global_step < 100:
+        #    log_weight_stats(self.mlp_model)
 
         # invoke `before_backward` interface of density controller
         self.density_controller.before_backward(
@@ -680,6 +714,7 @@ class GaussianSplatting(LightningModule):
         # gaussian model optimizer and scheduler setup
         gaussian_optimizers, gaussian_schedulers = self.gaussian_model.training_setup(self)
         self.gaussian_optimizers = gaussian_optimizers
+        
         if isinstance(self.gaussian_optimizers, list) is False:
             self.gaussian_optimizers = [self.gaussian_optimizers]
         add_optimizers_and_schedulers(gaussian_optimizers, gaussian_schedulers)
@@ -695,6 +730,21 @@ class GaussianSplatting(LightningModule):
         # metric optimizer and scheduler setup
         metric_optimizer, metric_scheduler = self.metric.training_setup(self)
         add_optimizers_and_schedulers(metric_optimizer, metric_scheduler)
+        if self.mlp:
+            mlp_optimizer = torch.optim.Adam(
+                self.mlp_model.parameters(), 
+                lr=self.mlp_options['mlp_lr'], 
+                weight_decay=self.mlp_options['mlp_weight_decay']
+                )
+            mlp_scheduler = torch.optim.lr_scheduler.MultiStepLR(
+                mlp_optimizer, 
+                milestones=self.mlp_options['mlp_milestones'], 
+                gamma=self.mlp_options['mlp_gamma']
+                )
+            add_optimizers_and_schedulers(
+                mlp_optimizer if self.mlp else None, 
+                mlp_scheduler if self.sch else None
+                )
 
         return optimizers, schedulers
 
@@ -734,6 +784,7 @@ class GaussianSplatting(LightningModule):
         )
         os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
         self.trainer.save_checkpoint(checkpoint_path)
+
         with torch.no_grad():
             xyz = self.gaussian_model.get_xyz
             rgb = eval_sh(0, self.gaussian_model.get_features[:, :1, :].transpose(1, 2), None)
@@ -742,6 +793,17 @@ class GaussianSplatting(LightningModule):
                 "checkpoints",
                 "epoch={}-step={}{}-xyz_rgb.ply".format(self.trainer.current_epoch, self.trainer.global_step, checkpoint_name_suffix),
             ), xyz.cpu().numpy(), ((rgb + 0.5).clamp(min=0., max=1.) * 255).to(torch.int).cpu().numpy())
+        ckpt_mlp_dir = os.path.join(self.hparams["output_path"], "checkpoints_mlp")
+        os.makedirs(ckpt_mlp_dir, exist_ok=True)
+        if self.mlp:
+            mlp_path = os.path.join(
+                ckpt_mlp_dir,
+                "epoch={}-step={}{}-mlp.pt".format(
+                    self.trainer.current_epoch, self.trainer.global_step, checkpoint_name_suffix
+                ),
+            )
+            torch.save(self.mlp_model.state_dict(), mlp_path)
+            print(f"[MLP] saved to {mlp_path}")
         print("Checkpoint saved to {}".format(checkpoint_path))
 
     def set_datamodule_device(self, device):
@@ -759,7 +821,8 @@ class GaussianSplatting(LightningModule):
     def _on_device_updated(self):
         self.metric.on_parameter_move(device=self.device)
         self.set_datamodule_device(self.device)
-
+        if self.mlp:
+            self.mlp_model = self.mlp_model.to(self.device)
     def to(self, *args: Any, **kwargs: Any) -> Self:
         super().to(*args, **kwargs)
 
