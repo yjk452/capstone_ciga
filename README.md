@@ -2,7 +2,7 @@
 <p align="center">
 <h1 align="center"><strong>CityGaussian Series for High-quality Large-Scale Scene Reconstruction with Gaussians</strong></h1>
   <p align="center">
-    <em>Institute of Automation, Chinese Academy of Sciences; University of Chinese Academy of Sciences</em>
+    <em>Institute of Automation, Chinese Academy of Sciences; University of Chinese Academy of Sciences123123</em>
   </p>
 </p>
 
