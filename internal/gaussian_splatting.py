@@ -28,10 +28,11 @@ from internal.metrics.vanilla_metrics import VanillaMetrics
 from internal.density_controllers.density_controller import DensityController
 from internal.density_controllers.vanilla_density_controller import VanillaDensityController
 from jsonargparse import lazy_instance
-
+import math
 from internal.utils.sh_utils import eval_sh
 from internal.utils.graphics_utils import store_ply
 from internal.models.sh_core import AdaptiveSHLoss
+from internal.renderers.ciga_renderer import CigaRenderer
 
 class GaussianSplatting(LightningModule):
     def __init__(
@@ -47,7 +48,8 @@ class GaussianSplatting(LightningModule):
             save_val_output: bool = False,
             save_val_metrics: bool = None,
             max_save_val_output: int = -1,
-            renderer: Union[Renderer, RendererConfig] = lazy_instance(VanillaRenderer),
+            #renderer: Union[Renderer, RendererConfig] = lazy_instance(VanillaRenderer),
+            renderer: Union[Renderer, RendererConfig] = lazy_instance(CigaRenderer),
             metric: Metric = lazy_instance(VanillaMetrics),
             density: DensityController = lazy_instance(VanillaDensityController),
             save_ply: bool = False,
@@ -390,7 +392,7 @@ class GaussianSplatting(LightningModule):
             distances = outputs["adaptive_sh_info"]["distances"]
             gaussian_pos = self.gaussian_model.get_xyz
 
-            shs = self.gaussian_model.get_features.transpose(1, 2)
+            # shs = self.gaussian_model.get_features.transpose(1, 2)
 
             adaptive_losses = self.adaptive_loss_fn(
                 base_l_rgb=base_l_rgb,
@@ -592,28 +594,6 @@ class GaussianSplatting(LightningModule):
                 "epoch": max(self.trainer.current_epoch, self.restored_epoch),
                 "step": max(self.trainer.global_step, self.restored_global_step),
             })
-
-            # if self.log_image is not None:
-            #     grid = torchvision.utils.make_grid(torch.concat([outputs["render"], gt_image], dim=-1))
-            #     self.log_image(
-            #         tag="{}_images/{}".format(name, image_info[0].replace("/", "_")),
-            #         image_tensor=grid,
-            #     )
-            #
-            # image_output_path = os.path.join(
-            #     self.hparams["output_path"],
-            #     name,
-            #     "epoch={}-step={}".format(
-            #         max(self.trainer.current_epoch, self.restored_epoch),
-            #         max(self.trainer.global_step, self.restored_global_step),
-            #     ),
-            #     "{}.png".format(image_info[0].replace("/", "_"))
-            # )
-            # os.makedirs(os.path.dirname(image_output_path), exist_ok=True)
-            # torchvision.utils.save_image(
-            #     torch.concat([outputs["render"], gt_image], dim=-1),
-            #     image_output_path,
-            # )
 
     def on_validation_epoch_start(self) -> None:
         super().on_validation_epoch_start()

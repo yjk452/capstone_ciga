@@ -28,13 +28,30 @@ from typing import Optional, Dict
 # from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
 
 from .renderer import Renderer, RendererOutputInfo, RendererOutputTypes
-from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
+#from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
 from internal.utils.sh_utils import eval_sh
 
 from internal.models.sh_core import compute_distance, compute_nadir_angle, d_to_u, phi_to_v, apply_adaptive_sh_weights, GateLUT, GateMLP
+from internal.cameras.cameras import Camera
+from internal.models.gaussian import GaussianModel
+
+try:
+    from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
+except Exception:
 
 
-
+    class GaussianRasterizationSettings:
+            def __init__(self, **kwargs):
+                # 필요한 필드만 속성으로 저장 (H/W 등)
+                for k, v in kwargs.items():
+                    setattr(self, k, v)
+    class GaussianRasterizer:
+            # 혹시 실수로 이 경로를 쓸 수도 있으니 최소한의 에러 메시지
+            def __init__(self, *args, **kwargs):
+                raise RuntimeError(
+                    "GaussianRasterizer (CUDA) is not available in this environment. "
+                    "Inject a fake rasterizer via `renderer._make_rasterizer` for CPU smoke tests."
+                )
 
 class CigaRenderer(Renderer):
 
@@ -61,7 +78,8 @@ class CigaRenderer(Renderer):
         self.warp_weight = 0.5
 
         self.MLP = GateMLP(in_dim=2, L_max=3, hidden=32)
-        self.LUT = GateLUT(L_max=3, B_d=32, B_phi=32, ema=0.9, device="cuda")
+        #self.LUT = GateLUT(L_max=3, B_d=32, B_phi=32, ema=0.9, device="cuda")
+        self.LUT = GateLUT(L_max=3, B_d=32, B_phi=32, ema=0.9, device="cpu")
         self.lut_update_every = 500
         self._step = 0
         u_lin = torch.linspace(0, 1, self.LUT.B_d)
@@ -89,7 +107,7 @@ class CigaRenderer(Renderer):
             render_types: list = None,
 
     ):
-
+        
         """
 
         Render the scene.
@@ -176,8 +194,8 @@ class CigaRenderer(Renderer):
 
 
 
-        rasterizer = GaussianRasterizer(raster_settings=raster_settings)
-
+        #rasterizer = GaussianRasterizer(raster_settings=raster_settings)
+        rasterizer = getattr(self, "_make_rasterizer", lambda s: GaussianRasterizer(raster_settings=s))(raster_settings)
 
 
         means3D = pc.get_xyz
@@ -279,10 +297,29 @@ class CigaRenderer(Renderer):
                     cov3D_precomp=cov3D_precomp,
 
                 )
+        '''
+        cam = viewpoint_camera.camera_center
+        if not torch.is_tensor(cam):
+            cam = torch.as_tensor(cam, device=means3D.device, dtype=means3D.dtype)
+        else:
+            cam = cam.to(device=means3D.device, dtype=means3D.dtype)
+        cam = cam.view(3) '''
 
         # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
 
         # They will be excluded from value updates used in the splitting criteria.
+        if "distances" in extra and "nadir_angles" in extra:
+            extra["adaptive_sh_info"] = {
+                "distances": extra.pop("distances"),
+                "nadir_angles": extra.pop("nadir_angles"),
+            }
+
+        # (2) 학습용으로 shs도 outputs에 싣기 (렌더러가 SH-계수 가중 후 값을 손실에 전달)
+        if shs is not None:
+            extra["shs"] = shs
+
+
+
 
         return {
 
@@ -326,6 +363,11 @@ class CigaRenderer(Renderer):
 
         distances = compute_distance(camera_center, means3D_vis)
         nadir_angles = compute_nadir_angle(camera_center, means3D_vis)
+
+    
+        '''view_dirs  = self._view_dir_from(camera_center, means3D_vis)
+        cam = camera_center.to(device=device, dtype=means3D.dtype)
+        cam_vis = cam.unsqueeze(0).expand(means3D_vis.size(0), -1)'''
         
 
         u = d_to_u(distances, self.d_low, self.d_high, self.d0, self.warp_weight)
@@ -352,6 +394,10 @@ class CigaRenderer(Renderer):
             if self._step % self.lut_update_every == 0:
                 with torch.no_grad():
                     self.LUT.update_from_mlp(self.MLP, self.grid_u, self.grid_v)
+
+        ''' 
+        x_mlp = torch.cat([u.unsqueeze(-1), view_dirs, cam_vis], dim=-1)
+        sh_weights_vis = self.MLP(x_mlp) '''
 
         
 
@@ -551,7 +597,10 @@ class CigaRenderer(Renderer):
         if not hasattr(self, "MLP"):
             return []
         return list(self.MLP.parameters())
+    
 
+
+#lut끄면 끄기
     def switch_to_lut_during_training(self, global_step: int = None):
         # 최신 MLP로 LUT를 한 번 갱신한 뒤, 학습 중에도 LUT를 쓰도록 플래그 ON
         if hasattr(self, "LUT") and hasattr(self, "MLP") and hasattr(self, "grid_u") and hasattr(self, "grid_v"):
@@ -560,6 +609,12 @@ class CigaRenderer(Renderer):
 
         self.use_lut_during_train = True
         self.lut_switched_at_step = int(global_step) if global_step is not None else None
+'''
+    def _view_dir_from(self, camera_center: torch.Tensor, means3D: torch.Tensor) -> torch.Tensor:
+    # camera -> gaussian 단위 방향벡터 [N,3]
+        v = means3D - camera_center.unsqueeze(0)
+        return F.normalize(v, dim=-1)  '''    #거리 방향 위치 
+
 
 
 

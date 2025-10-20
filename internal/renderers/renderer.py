@@ -109,6 +109,11 @@ class Renderer(torch.nn.Module):
         return {
             "rgb": RendererOutputInfo("render")
         }
+    from typing import Iterable
+    import torch.nn as nn
+    def get_adaptive_parameters(self) -> Iterable[nn.Parameter]:
+    
+        return ()
 
 
 @dataclass
