@@ -121,4 +121,8 @@
 !fused_ssim.yaml
 
 
-!usgs.yaml
+!ucgs.yaml
+!ucgs_coarse_sh3.yaml  
+!ucgs_coarse_sh3
+!ciga_test.yaml
+!ciga.yaml

@@ -8,24 +8,21 @@ import math
 
 def band_flatten(sh_weight: torch.Tensor, L: int) -> torch.Tensor:
 
-    N, C, B = sh_weight.shape
-    assert C == 3 and B == L + 1
-    K = (L + 1) ** 2
-    
-    # 차수 계수 수: 2l+1
+    N, B = sh_weight.shape
+    assert B == L + 1, f"got {sh_weight.shape}, expected [N,{L+1}]"
+
     band_sizes = torch.tensor([2*l + 1 for l in range(L + 1)],
-                            device=sh_weight.device)
-    
+                              device=sh_weight.device)
     band_of_coeff = torch.repeat_interleave(
-        torch.arange(L + 1, device=sh_weight.device), band_sizes
-    )  # shape: [K]
-    
-    weights_coeff = sh_weight.index_select(dim=2, index=band_of_coeff)  # [N,C,K]
-    return weights_coeff
+        torch.arange(L + 1, device=sh_weight.device),
+        band_sizes
+    )  # [K]
+    coeff_weights = sh_weight.index_select(dim=1, index=band_of_coeff)  # [N,K]
+    return coeff_weights
 
 
 class GateMLP(nn.Module):
-    def __init__(self, in_dim=2, L_max=3, hidden=32):
+    def __init__(self, in_dim=4, L_max=3, hidden=32): #[u(d),v_x​,v_y​,v_z​,cx​,cy​,cz]  dim =7 (최소)
         super().__init__()
         self.L_max = L_max
         self.net = nn.Sequential(
@@ -57,8 +54,8 @@ def phi_to_v(phi):
 
 
 
-
-class GateLUT(nn.Module):
+#각도 사용안한다면 끄기
+class GateLUT(nn.Module):  
     def __init__(self, L_max=3, B_d=32, B_phi=32, ema=0.9, device="cuda"):
         super().__init__()
         self.L_max = L_max
@@ -68,8 +65,6 @@ class GateLUT(nn.Module):
         table = torch.full((1, L_max+1, B_phi, B_d), 0.1, device=device)
         self.register_buffer("table", table)
  
-
-
     @torch.no_grad()
     def update_from_mlp(self, mlp: GateMLP, grid_u: torch.Tensor, grid_v: torch.Tensor):
         """MLP로부터 LUT 업데이트"""
@@ -141,13 +136,13 @@ class AdaptiveSHLoss(nn.Module):
                               nadir_angles: torch.Tensor) -> torch.Tensor:
     
         device = shs.device
-
-        N, C, K = shs.shape
+        assert shs.dim()==3 and shs.shape[2]==3, f"expect [N,K,3], got {shs.shape}"
+        N, K, C = shs.shape
         L = int(math.isqrt(K)) - 1
         aerial_mask = (nadir_angles < self.aerial_threshold)
         if aerial_mask.sum() == 0:
             return torch.zeros((), device=device)
-        
+
         #shs = shs.permute(0, 2, 1) # [N, 3, K]  계산 편의상 -> gs splatting에서 
 
         loss =  shs.new_zeros(())  # 스칼라 초기화
@@ -238,19 +233,19 @@ class AdaptiveSHLoss(nn.Module):
 
 def apply_adaptive_sh_weights(shs: torch.Tensor, sh_weights: torch.Tensor, 
                               L: int) -> torch.Tensor:
-    N, C, K = shs.shape
-    assert C == 3, "Expected RGB channels in dim 1"
-    assert K == (L + 1) ** 2, f"K={K} must equal (L+1)²={(L+1)**2}"
-    
-    # 밴드별 가중치를 계수별로 확장: [N, L+1] -> [N, 3, K]
-    sh_weights_expanded = sh_weights.unsqueeze(1).expand(-1, 3, -1)  # [N, 3, L+1]
-    weights_coeff = band_flatten(sh_weights_expanded, L)  # [N, 3, K]
-    
-    # l=0 은 가중치 1.0 유지
-    weights_coeff[:, :, 0] = 1.0
-    
-    weighted_shs = shs * weights_coeff
-    return weighted_shs
+
+    assert shs.dim() == 3 and shs.shape[2] == 3, f"expect [N,K,3], got {shs.shape}"
+    N, K, C = shs.shape
+    assert K == (L + 1) ** 2 and C == 3, f"{K=} {(L+1)**2=} {C=}"
+
+
+    sh_weights = sh_weights.clone()
+    sh_weights[:, 0] = 1.0
+
+    # [N,L+1] → [N,K] → [N,K,1]
+    coeff_w = band_flatten(sh_weights, L).unsqueeze(-1)  # [N,K,1]
+
+    return shs * coeff_w
 
 
 
@@ -273,3 +268,26 @@ def compute_distance(camera_pos: torch.Tensor, gaussian_pos: torch.Tensor) -> to
         [N] 거리  '''
     distances = torch.norm(gaussian_pos - camera_pos.unsqueeze(0), dim=-1)
     return distances
+
+
+# def view_dir_from(camera_pos: torch.Tensor, gaussian_pos: torch.Tensor) -> torch.Tensor:
+#     """Returns [N,3]"""
+#     v = gaussian_pos - camera_pos.unsqueeze(0)
+#     return F.normalize(v, dim=-1)
+
+# def dir_to_v_from_down(view_dirs: torch.Tensor) -> torch.Tensor:
+#     down_dir = torch.tensor([0.0, 0.0, -1.0], device=view_dirs.device)
+#     cosang = torch.sum(view_dirs * down_dir, dim=-1).clamp(-1.0, 1.0)
+#     return torch.acos(cosang) / math.pi  # [N]
+
+
+def ensure_NKC(shs: torch.Tensor) -> torch.Tensor:
+   
+    if shs.dim() != 3:
+        raise ValueError(f"expect 3D tensor, got {shs.shape}")
+    N, A, B = shs.shape
+    if B == 3:         # [N,K,3]
+        return shs
+    if A == 3:         # [N,3,K] -> [N,K,3]
+        return shs.transpose(1, 2).contiguous()
+    raise ValueError(f"expect [N,K,3] or [N,3,K], got {shs.shape}")
