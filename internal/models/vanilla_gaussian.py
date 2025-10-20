@@ -4,6 +4,11 @@ import torch
 import numpy as np
 from torch import nn
 
+from typing import TYPE_CHECKING, Optional
+if TYPE_CHECKING:
+    from internal.renderers.ciga_renderer import CigaRenderer  
+
+
 from .gaussian import (
     Gaussian,
     GaussianModel,
@@ -118,7 +123,7 @@ class VanillaGaussianModel(
         # SHs
         shs = torch.zeros((n_gaussians, 3, (self.config.sh_degree + 1) ** 2)).float()
         shs[:, :3, 0] = fused_color
-        shs[:, 3:, 1:] = 0.0
+        shs[:, :, 1:] = 0.0
 
         # scales
         # TODO: replace `simple_knn`
@@ -251,6 +256,13 @@ class VanillaGaussianModel(
             torch.optim.lr_scheduler.LRScheduler,
         ]]
     ]:
+        
+        renderer = getattr(self, "renderer", None) or getattr(module, "renderer", None)
+        if renderer is not None and hasattr(renderer, "training_setup"):
+            renderer.training_setup(module)
+
+
+
         spatial_lr_scale = self.config.optimization.spatial_lr_scale
         if spatial_lr_scale <= 0:
             spatial_lr_scale = module.trainer.datamodule.dataparser_outputs.camera_extent
@@ -295,6 +307,9 @@ class VanillaGaussianModel(
 
         #return [means_optimizer, constant_lr_optimizer], [means_scheduler]
 
+
+
+
         gate_optimizer = None
         gate_lr = getattr(self.config.optimization, "adaptive_sh_lr", 1e-3)  # YAML에 넣어둔 값
         renderer = getattr(self, "renderer", None) or getattr(module, "renderer", None)
@@ -311,6 +326,9 @@ class VanillaGaussianModel(
         if gate_optimizer is not None:
             optimizers.append(gate_optimizer)
         return optimizers, [means_scheduler]
+    
+
+
 
     def get_property_names(self) -> Tuple[str, ...]:
         return self._names
@@ -322,6 +340,9 @@ class VanillaGaussianModel(
         if self._active_sh_degree >= self.config.sh_degree:
             return
         self._active_sh_degree += 1
+
+
+
 
         lut_cfg = getattr(self.config, "inference", None)
         lut_switch_step = None
@@ -338,6 +359,10 @@ class VanillaGaussianModel(
                 self._lut_switched = True
                 if hasattr(module, "log"):
                     module.log("info/lut_switched_at", float(step))
+
+
+
+
 
     # define properties by getters and setters
 

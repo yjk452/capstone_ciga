@@ -730,6 +730,10 @@ class GaussianSplatting(LightningModule):
         renderer_optimizer, renderer_scheduler = self.renderer.training_setup(self)
         add_optimizers_and_schedulers(renderer_optimizer, renderer_scheduler)
 
+        gaussian_optimizers, gaussian_schedulers = self.gaussian_model.training_setup(self)
+        self.gaussian_optimizers = gaussian_optimizers if isinstance(gaussian_optimizers, list) else [gaussian_optimizers]
+        add_optimizers_and_schedulers(gaussian_optimizers, gaussian_schedulers)
+
         # metric optimizer and scheduler setup
         metric_optimizer, metric_scheduler = self.metric.training_setup(self)
         add_optimizers_and_schedulers(metric_optimizer, metric_scheduler)

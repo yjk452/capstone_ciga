@@ -7,16 +7,17 @@ import math
 
 
 def band_flatten(sh_weight: torch.Tensor, L: int) -> torch.Tensor:
-
+    
     N, B = sh_weight.shape
     assert B == L + 1, f"got {sh_weight.shape}, expected [N,{L+1}]"
 
+    dev = sh_weight.device
     band_sizes = torch.tensor([2*l + 1 for l in range(L + 1)],
-                              device=sh_weight.device)
+                              device=dev, dtype=torch.long)       # [L+1]
     band_of_coeff = torch.repeat_interleave(
-        torch.arange(L + 1, device=sh_weight.device),
+        torch.arange(L + 1, device=dev, dtype=torch.long),
         band_sizes
-    )  # [K]
+    )                                                              # [K]
     coeff_weights = sh_weight.index_select(dim=1, index=band_of_coeff)  # [N,K]
     return coeff_weights
 
