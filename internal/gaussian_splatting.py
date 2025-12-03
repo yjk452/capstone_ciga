@@ -34,7 +34,9 @@ from internal.utils.graphics_utils import store_ply
 
 #ciga
 from internal.models.ciga_mlp import CigaMLP
-from internal.renderers.ciga_trim_renderer import CigaRenderer
+from internal.renderers.ciga_trim_renderer import CigaTrimRenderer
+from internal.renderers.ciga_renderer2 import CigaRenderer
+
 from log import log_weight_stats, nuke_dir, print_to
 from pathlib import Path
 
