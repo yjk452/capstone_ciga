@@ -1,11 +1,13 @@
 from pathlib import Path
 import shutil
 
-def print_to(file, *args, sep=" ", end="\n"):
-    file_path = Path("/home/jinholee/Ciga/logs/",file)
+def print_to(dir_path, file_name, *args, sep=" ", end="\n"):
+    dir_path = Path(dir_path)
+    dir_path.mkdir(parents=True, exist_ok=True)
+    file_path = dir_path / file_name
 
-    with open(file_path, "a", encoding="utf-8") as f:
-        print(*args, sep=sep, end=end, file=f)  
+    with file_path.open("a", encoding="utf-8") as f:
+        print(*args, sep=sep, end=end, file=f)
 
 def nuke_dir(recreate: bool = True):
     d = Path("/home/jinholee/Ciga/logs/")
@@ -14,8 +16,13 @@ def nuke_dir(recreate: bool = True):
     if recreate:
         d.mkdir(parents=True, exist_ok=True)        
 
-def log_weight_stats(module, file_path="/home/jinholee/Ciga/logs/mlp_weight_stats.txt", step=-1):
-    with open(file_path, "a", encoding="utf-8") as f:
+
+def log_weight_stats(module, file_name, dir_path, step=-1):
+    dir_path = Path(dir_path)
+    dir_path.mkdir(parents=True, exist_ok=True)
+    file_path = dir_path / file_name
+
+    with file_path.open("a", encoding="utf-8") as f:
         f.write(f"step: {step}\n")
         for name, p in module.named_parameters():
             t = p.detach()

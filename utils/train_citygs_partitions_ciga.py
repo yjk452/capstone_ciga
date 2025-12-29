@@ -134,7 +134,7 @@ if __name__ == "__main__":
     parser.add_argument("--project_name", "-p", type=str, required=True)
     parser.add_argument("--dry-run", action="store_true", default=False)
 
-    MIN_FREE_MIB = 16500
+    MIN_FREE_MIB = 10000
 
     args, training_and_srun_args = parser_stoppable_args(parser)
     training_args, srun_args = split_stoppable_args(training_and_srun_args)

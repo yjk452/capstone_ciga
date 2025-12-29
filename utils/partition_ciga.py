@@ -132,6 +132,9 @@ if __name__ == "__main__":
     scene.get_scene_bounding_box()
     scene.build_partition_coordinates()
     print(f"Camera center based partition assignment: {scene.camera_center_based_partition_assignment().sum(-1)}")
+    renderer = renderer.to(device)    
+    if hasattr(renderer, "setup"):
+        renderer.setup(model)
     print(f"Projection based partition assignment: {scene.projection_based_partition_assignment(model, renderer, dataset.cameras, bkgd_color).sum(-1)}")
 
     output_path = os.path.join(dataset_path, scene.build_output_dirname())

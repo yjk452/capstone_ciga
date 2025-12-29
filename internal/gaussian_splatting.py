@@ -103,19 +103,22 @@ class GaussianSplatting(LightningModule):
                 in_features=7,
                 sh_max_degree = self.gaussian_model.get_max_sh_degree()
             )
-            # [YAML]/ mlp_cfg: path:  
-            # Load MLP Model
             if self.mlp_path is not None:
                 params = torch.load(self.mlp_path)
                 self.mlp_model.load_state_dict(params, strict=self.mlp_cfg.get('strict', True))
-                for p in self.mlp_model.parameters():
-                    p.requires_grad_(False)
-                self.mlp_model.eval()
+                if self.mlp_train:
+                    for param in self.mlp_model.parameters():
+                        param.requires_grad = True
+                    self.mlp_model.train()
+                else:
+                    for param in self.mlp_model.parameters():
+                        param.requires_grad = False
+                    self.mlp_model.eval()
         else:
             self.mlp_model=None
 
         self.light_gaussian_hparams = light_gaussian
-
+        
         # instantiate renderer
         if isinstance(renderer, RendererConfig):
             renderer = renderer.instantiate()
@@ -228,21 +231,15 @@ class GaussianSplatting(LightningModule):
         if self.hparams["max_save_val_output"] > 0:
             self.hparams["save_val_output"]=True
 
-        self.renderer.setup(stage=stage, lightning_module=self)
+        if self.logs['log']:
+            self.log_dir = os.path.join(self.hparams["output_path"], "log")
+            os.makedirs(self.log_dir, exist_ok=True)
+
+        self.renderer.setup(gs=self)
         self.metric.setup(stage=stage, pl_module=self)
         self.density_controller.setup(stage=stage, pl_module=self)
-        if isinstance(self.renderer, CigaRenderer):
-            if self.mlp:
-                self.renderer.set_mlp(self.mlp_model, self.mlp_train)
-            else:
-                self.renderer.set_mlp(None, self.mlp_train)
-            
-            if self.logs['log']:
-                self.renderer.set_log(True)
-                nuke_dir(recreate=True)
-            else:
-                self.renderer.set_log(False)
-            
+
+
         # use different image log method based on the logger type
         self.log_image = None
         if isinstance(self.logger, lightning.pytorch.loggers.TensorBoardLogger):
@@ -448,9 +445,8 @@ class GaussianSplatting(LightningModule):
 
         if self.trainer.global_step > self.logs['step'] and self.logs['log']:
             self.logs['log'] = False
-            self.renderer.set_log(False)
         if self.logs['log']:
-            log_weight_stats(self.mlp_model, step=self.trainer.global_step)
+            log_weight_stats(self.mlp_model, "GS_mlp_weight.txt", self.log_dir, step=self.trainer.global_step)
             
             
 
@@ -684,6 +680,35 @@ class GaussianSplatting(LightningModule):
                 metrics_writer.writerow(mean_metrics)
 
         self.val_metrics.clear()
+    
+    def on_test_start(self):
+        """
+        테스트가 시작될 때(체크포인트 로딩 직후) 호출됩니다.
+        CLI에서 지정한 MLP 경로가 있다면, 체크포인트 값을 무시하고 해당 파일로 덮어씁니다.
+        """
+        # 1. mlp_cfg 설정 가져오기
+        mlp_cfg = self.hparams.get("mlp_cfg", {})
+        target_mlp_path = mlp_cfg.get("path", None)
+        
+        # 2. 로드할 경로가 있고, 모델에 MLP가 활성화되어 있다면 재로딩 수행
+        if target_mlp_path is not None and getattr(self, "mlp", False) and getattr(self, "mlp_model", None) is not None:
+            print(f"\n[INFO] on_test_start: Overriding MLP weights from {target_mlp_path}")
+            
+            try:
+                # CPU로 로드 후 현재 디바이스로 이동
+                ckpt = torch.load(target_mlp_path, map_location="cpu")
+                self.mlp_model.load_state_dict(ckpt, strict=False)
+                self.mlp_model.to(self.device)
+                self.mlp_model.eval()
+                
+                # 테스트 모드이므로 Gradient 계산 끄기
+                for param in self.mlp_model.parameters():
+                    param.requires_grad = False
+                    
+                print(f"[INFO] Successfully reloaded MLP from {target_mlp_path}\n")
+                
+            except Exception as e:
+                print(f"[ERROR] Failed to reload MLP from {target_mlp_path}: {e}")
 
     def on_test_epoch_start(self) -> None:
         super().on_test_epoch_start()
