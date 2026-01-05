@@ -55,7 +55,7 @@ class OptimizationConfig:
     sh_degree_up_interval: int = 1_000
 
     optimizer: OptimizerConfig = field(default_factory=lambda: {"class_path": "Adam"})
-
+    adaptive_sh_lr: float = 5e-5  # if <=0, freeze the gate_mlp during training
 
 @dataclass
 class InferenceConfig:
@@ -310,18 +310,37 @@ class VanillaGaussianModel(
 
 
 
+        
+
         gate_optimizer = None
-        gate_lr = getattr(self.config.optimization, "adaptive_sh_lr", 1e-3)  # YAML에 넣어둔 값
+        gate_lr = getattr(self.config.optimization, "adaptive_sh_lr", 5e-5)
+
+        
+        # log_dir = str(getattr(module.trainer, "log_dir", ""))
+        # if "blocks" in log_dir:
+        #     gate_lr = 0.0
+        #     self.config.optimization.adaptive_sh_lr = 0.0
+        #     print("  [block mode] force freeze gate MLP (adaptive_sh_lr=0)")
+
         renderer = getattr(self, "renderer", None) or getattr(module, "renderer", None)
         gate_params = []
         if renderer is not None and hasattr(renderer, "get_adaptive_parameters"):
             gate_params = list(renderer.get_adaptive_parameters())
 
         if len(gate_params) > 0:
-            gate_optimizer = torch.optim.Adam([{"name": "gate_mlp", "params": gate_params}], lr=gate_lr)
-            self._add_optimizer_after_backward_hook_if_available(gate_optimizer, module)
-            print(f"  gate_mlp={gate_lr}")
+            if gate_lr > 0:
+                gate_optimizer = torch.optim.Adam(
+                    [{"name": "gate_mlp", "params": gate_params}],
+                    lr=gate_lr,
+                )
+                self._add_optimizer_after_backward_hook_if_available(gate_optimizer, module)
+                print(f"  gate_mlp={gate_lr}")
+            else:
+                for p in gate_params:
+                    p.requires_grad_(False)
+                print("  gate_mlp frozen (adaptive_sh_lr <= 0)")
 
+                
         optimizers = [means_optimizer, constant_lr_optimizer]
         if gate_optimizer is not None:
             optimizers.append(gate_optimizer)
@@ -340,9 +359,6 @@ class VanillaGaussianModel(
         if self._active_sh_degree >= self.config.sh_degree:
             return
         self._active_sh_degree += 1
-
-
-
 
         lut_cfg = getattr(self.config, "inference", None)
         lut_switch_step = None

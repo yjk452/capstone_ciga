@@ -1,24 +1,26 @@
 
-
 import math
-
 from typing import Optional, Dict
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from .renderer import *
 from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
 from internal.utils.sh_utils import eval_sh
 
 from internal.models.sh_core import (
-    compute_distance, compute_nadir_angle,
-    d_to_u, phi_to_v, apply_adaptive_sh_weights,
-    GateLUT, GateMLP, band_flatten
+    build_gate_input,
+    compute_distance,
+    d_to_u,
+    apply_adaptive_sh_weights,
+    GateMLP,
+    band_flatten,
+    compute_nadir_cos_angle,
+    cos_to_v,
 )
 
-from log import print_to 
+from log import print_to
 
 
 class CigaRenderer(Renderer):
@@ -35,19 +37,31 @@ class CigaRenderer(Renderer):
         self.compute_cov3D_python = compute_cov3D_python
         self.convert_SHs_python = convert_SHs_python
         self.mlp_cfg = mlp_cfg or {}
-        self.mlp_model: Optional[nn.Module] = None
-        self._last_band_w = None  
 
-    
+        L_max = sh_max_degree if sh_max_degree is not None else 3
+
+        # footprint 제거 => 기본 in_dim=2
+        in_dim = self.mlp_cfg.get("in_dim", 2)
+        hidden = self.mlp_cfg.get("hidden", 64)
+
+        self.use_gate_mlp = self.mlp_cfg.get("use_gate_mlp", True)
+
+        if self.use_gate_mlp:
+            self.mlp_model = GateMLP(
+                in_dim=in_dim,
+                L_max=L_max,
+                hidden=hidden,
+            )
+        else:
+            self.mlp_model = None
+
+        self._last_band_w = None
+
     def training_setup(self, pl_module):
-      
-        L_max = int(getattr(pl_module.gaussian_model, "max_sh_degree", 3))
-        in_dim = self.mlp_cfg.get("in_dim", 4)  
-        hidden = self.mlp_cfg.get("hidden", 32)
-        self.mlp_model = GateMLP(in_dim=in_dim, L_max=L_max, hidden=hidden).to(pl_module.device)
-        return None, None  
+        if self.mlp_model is not None:
+            self.mlp_model.to(pl_module.device)
+        return None, None
 
-   
     def get_adaptive_parameters(self):
         return [] if self.mlp_model is None else self.mlp_model.parameters()
 
@@ -69,7 +83,6 @@ class CigaRenderer(Renderer):
         override_color: Optional[torch.Tensor] = None,
         render_types: Optional[list] = None,
     ):
-    
         if render_types is None:
             render_types = ["rgb"]
         assert len(render_types) == 1, "CigaRenderer currently supports single render type at a time."
@@ -84,12 +97,10 @@ class CigaRenderer(Renderer):
             bg_color = torch.zeros_like(bg_color)
             override_color = depth.repeat(1, 3)
 
-        # screen-space points for grads
         screenspace_points = torch.zeros_like(
             pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device=bg_color.device
         ) + 0
 
-        # raster settings
         tanfovx = math.tan(viewpoint_camera.fov_x * 0.5)
         tanfovy = math.tan(viewpoint_camera.fov_y * 0.5)
 
@@ -114,15 +125,15 @@ class CigaRenderer(Renderer):
         means2D = screenspace_points
         opacity = pc.get_opacity
 
-        # covariance
         scales = rotations = cov3D_precomp = None
         if self.compute_cov3D_python:
             cov3D_precomp = pc.get_covariance(scaling_modifier)
         else:
             scales = pc.get_scaling
+            if callable(scales):
+                scales = scales()
             rotations = pc.get_rotation
 
-        # SH / colors
         shs = None
         colors_precomp = None
         if override_color is None:
@@ -137,17 +148,16 @@ class CigaRenderer(Renderer):
         else:
             colors_precomp = override_color
 
-       
         shs_before = shs
         shs_after = self.shs_weight_MLP(
             rasterizer=rasterizer,
             shs=shs,
             VC=viewpoint_camera,
             means3D=means3D,
+            scales=scales, 
             L=pc.active_sh_degree,
         )
 
-        # render
         rasterize_result = rasterizer(
             means3D=means3D,
             means2D=means2D,
@@ -166,13 +176,8 @@ class CigaRenderer(Renderer):
 
         cam = viewpoint_camera.camera_center.to(means3D.device, means3D.dtype)
         vec = means3D - cam
-        distances = torch.linalg.norm(vec, dim=1)  # [N]
-        down = torch.tensor([0.0, 0.0, -1.0], device=means3D.device, dtype=means3D.dtype)
-        dirs = vec / (distances.unsqueeze(1) + 1e-8)
-        cosang = torch.clamp(dirs @ down, -1.0, 1.0)
-        nadir_angles = torch.acos(cosang)  # [N]
+        distances = torch.linalg.norm(vec, dim=1)
 
-        # ===== recover per-band weights across all N =====
         sh_weights = None
         if self._last_band_w is not None:
             band_w_full, vis_idx, L_full = self._last_band_w
@@ -186,23 +191,21 @@ class CigaRenderer(Renderer):
             "viewspace_points": screenspace_points,
             "visibility_filter": radii > 0,
             "radii": radii,
-
-            # Adaptive SH training
-            "shs": shs_after if shs_after is not None else shs_before,
-            "sh_weights": sh_weights,  # [N, L_full+1] or None
+            "shs_raw": shs_before,
+            "shs_gated": shs_after,
+            "sh_weights": sh_weights,
             "adaptive_sh_info": {
-                "distances": distances,        # [N]
-                "nadir_angles": nadir_angles,  # [N]
+                "distances": distances,
             },
         }
 
     @staticmethod
     def render(
-        means3D: torch.Tensor,  # xyz
+        means3D: torch.Tensor,
         opacity: torch.Tensor,
         scales: Optional[torch.Tensor],
         rotations: Optional[torch.Tensor],
-        features: Optional[torch.Tensor],  # shs
+        features: Optional[torch.Tensor],
         active_sh_degree: int,
         viewpoint_camera,
         bg_color: torch.Tensor,
@@ -216,11 +219,9 @@ class CigaRenderer(Renderer):
             assert scales is None
             assert rotations is None
 
-
         screenspace_points = torch.zeros_like(
             means3D, dtype=means3D.dtype, requires_grad=True, device=means3D.device
         )
-
 
         tanfovx = math.tan(viewpoint_camera.fov_x * 0.5)
         tanfovy = math.tan(viewpoint_camera.fov_y * 0.5)
@@ -260,7 +261,6 @@ class CigaRenderer(Renderer):
         else:
             rendered_image, radii, depth_image = rasterize_result
 
-
         return {
             "render": rendered_image,
             "depth": depth_image,
@@ -269,15 +269,13 @@ class CigaRenderer(Renderer):
             "radii": radii,
         }
 
-    
-    
-    def shs_weight_MLP(self, rasterizer, shs, VC, means3D, L=None):
+    def shs_weight_MLP(self, rasterizer, shs, VC, means3D, scales=None, L=None):
         if shs is None:
             return shs
         assert shs.ndim == 3
         device, dtype = shs.device, shs.dtype
 
-
+        # NKC/NCK 정규화
         orig_is_NKC = (shs.shape[2] == 3)
         if orig_is_NKC:
             N, K, C = shs.shape
@@ -286,77 +284,93 @@ class CigaRenderer(Renderer):
         else:
             N, C, K = shs.shape
             assert C == 3
-            shs_nkc = shs.permute(0, 2, 1).contiguous()  # -> NKC
+            shs_nkc = shs.permute(0, 2, 1).contiguous()
 
         r = int(round(math.sqrt(K)))
         assert r * r == K, f"K={K} is not a perfect square"
         L_full = r - 1
 
         if L is None or L < 0:
-       
-       
             L_active = getattr(self.gaussian_model, "active_sh_degree", L_full)
         else:
             L_active = L
         L_active = int(min(int(L_active), L_full))
 
-        # visible subset
+        # 보이는 가우시안만
         if hasattr(rasterizer, "markVisible"):
             with torch.no_grad():
                 vis_mask = rasterizer.markVisible(means3D)
             vis_idx = torch.where(vis_mask)[0]
             if vis_idx.numel() == 0:
-                self._last_band_w = (torch.ones(0, L_full+1, device=device, dtype=dtype), vis_idx, L_full)
+                self._last_band_w = (torch.ones(0, L_full + 1, device=device, dtype=dtype), vis_idx, L_full)
                 return shs if orig_is_NKC else shs_nkc.permute(0, 2, 1).contiguous()
             means3D_vis = means3D[vis_idx]
         else:
             vis_idx = torch.arange(N, device=device)
             means3D_vis = means3D
 
-        # camera center
-        cam = getattr(VC, "camera_center", None) or getattr(VC, "cam_pos", None)
+        # 카메라 위치
+        cam = getattr(VC, "camera_center", None)
+        if cam is None:
+            cam = getattr(VC, "cam_pos", None)
         if cam is None:
             raise RuntimeError("Viewer/Camera object has no camera_center/cam_pos")
-        cam = cam.to(device=device, dtype=dtype) if torch.is_tensor(cam) else torch.as_tensor(cam, device=device, dtype=dtype)
+
+        if not torch.is_tensor(cam):
+            cam = torch.as_tensor(cam, device=device, dtype=dtype)
+        else:
+            cam = cam.to(device=device, dtype=dtype)
+
         if cam.ndim == 2 and cam.shape[0] == 1:
             cam = cam.squeeze(0)
         elif cam.ndim != 1:
             cam = cam.view(-1)[:3]
 
-        # features: [u, dir(3)]  (in_dim=4 기본)
-        vec = means3D_vis - cam
-        dis = torch.linalg.norm(vec, dim=1, keepdim=True).clamp_min(1e-8)
-        dirv = vec / dis
-        try:
-            u = d_to_u(dis)
-        except TypeError:
-           
-            u = d_to_u(dis, 0.2, 80.0, 5.0, 0.5)
-        u = u.to(device=device, dtype=dtype)
-        x = torch.cat([u, dirv], dim=1)  # [M,4]
 
-        # predict band weights
+        d = compute_distance(cam, means3D_vis)                 # [M]
+        cos_angle = compute_nadir_cos_angle(cam, means3D_vis)  # [M]
+        x = build_gate_input(d, cos_angle, d_low=0.2, d_high=80.0, d0=5.0, dw=1.0)  # [M,2]
+
         use_mlp = (self.mlp_model is not None)
         if use_mlp and L_active >= 0:
-            band_w = self.mlp_model(x)  
-            # DC 고정
-            band_w[:, 0] = 1.0
-           
+            band_w = self.mlp_model(x)  # [M, L'+1]
+
+            # DC=1 (인플레이스 금지)
+            if band_w.shape[1] >= 1:
+                ones_dc = torch.ones_like(band_w[:, :1])
+                band_w = torch.cat([ones_dc, band_w[:, 1:]], dim=1)
+
+            # L_full 크기로 맞추기 (모자라면 1로 패딩)
             if band_w.shape[1] < (L_full + 1):
                 pad_cols = (L_full + 1) - band_w.shape[1]
                 pad = torch.ones(band_w.size(0), pad_cols, device=device, dtype=dtype)
                 band_w_full = torch.cat([band_w, pad], dim=1)
             else:
-                band_w_full = band_w[:, :L_full + 1]
+                band_w_full = band_w[:, : L_full + 1]
         else:
             M = means3D_vis.shape[0]
             band_w_full = torch.ones(M, L_full + 1, device=device, dtype=dtype)
 
+        if not torch.isfinite(band_w_full).all():
+            band_w_full = torch.where(torch.isfinite(band_w_full), band_w_full, torch.ones_like(band_w_full))
+
+        if torch.rand(1).item() < 0.001:
+            with torch.no_grad():
+                ho = band_w_full[:, 1:]
+                print(
+                    "[GateMLP] high-order mean={:.4f} std={:.4f} min={:.4f} max={:.4f}".format(
+                        ho.mean().item(),
+                        ho.std().item(),
+                        ho.min().item(),
+                        ho.max().item(),
+                    )
+                )
+
         coeff_w = band_flatten(band_w_full, L_full).unsqueeze(-1)  # [M,K,1]
+        w_safe = torch.where(torch.isfinite(coeff_w), coeff_w, torch.ones_like(coeff_w))
 
         shs_out_nkc = shs_nkc.clone()
-        shs_out_nkc[vis_idx] = shs_out_nkc[vis_idx] * coeff_w.to(dtype=dtype, device=device)
+        shs_out_nkc[vis_idx] = shs_out_nkc[vis_idx] * w_safe.to(dtype=dtype, device=device)
 
         self._last_band_w = (band_w_full.detach(), vis_idx, L_full)
-
         return shs_out_nkc if orig_is_NKC else shs_out_nkc.permute(0, 2, 1).contiguous()

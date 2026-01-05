@@ -183,13 +183,15 @@ class GaussianSplatting(LightningModule):
         self.metric.setup(stage=stage, pl_module=self)
         self.density_controller.setup(stage=stage, pl_module=self)
 
-        self.adaptive_loss_fn = AdaptiveSHLoss(
-                    lambda_sh=0.01,   
-                    lambda_gate=0.001,
-                    lambda_tv=0.005,
-                    lambda_mono=0.01,
-                    aerial_threshold=math.pi/6
-                ).to(self.device)
+        # self.adaptive_loss_fn = AdaptiveSHLoss(
+        #             lambda_sh=0.01,   
+        #             lambda_gate=0.001,
+        #             lambda_tv=0.0025,
+        #             lambda_mono=0.005,
+            
+        #         ).to(self.device)
+        self.adaptive_loss_fn = None
+
 
 
         # use different image log method based on the logger type
@@ -379,34 +381,37 @@ class GaussianSplatting(LightningModule):
         
 
 
+        sh_weights = outputs.get("sh_weights", None)
+        shs_raw    = outputs.get("shs_raw", None)
+               
+        can_adapt = (
+            "adaptive_sh_info" in outputs
+            and "sh_weights" in outputs
+            and ("shs_raw" in outputs)   
+        )
 
-        can_adapt = ("adaptive_sh_info" in outputs 
-                 and "sh_weights" in outputs 
-                 and ("shs" in outputs or "sh_coeffs" in outputs))
+        if (self.adaptive_loss_fn is not None) and can_adapt:
 
-        if hasattr(self, "adaptive_loss_fn") and can_adapt:
-            base_l_rgb = metrics["loss"]              # photometric(base) 손실
-            shs = outputs.get("shs", outputs.get("sh_coeffs"))
+            base_l_rgb = metrics["loss"]          # photometric(base)
+            shs_raw = outputs["shs_raw"]         
             sh_weights = outputs["sh_weights"]
-            nadir_angles = outputs["adaptive_sh_info"]["nadir_angles"]
-            distances = outputs["adaptive_sh_info"]["distances"]
+            distances = outputs["adaptive_sh_info"]["distances"] 
             gaussian_pos = self.gaussian_model.get_xyz
-
-            # shs = self.gaussian_model.get_features.transpose(1, 2)
+            
 
             adaptive_losses = self.adaptive_loss_fn(
                 base_l_rgb=base_l_rgb,
-                shs=shs,
+                shs_raw=shs_raw,
                 sh_weights=sh_weights,
-                nadir_angles=nadir_angles,
+
                 distances=distances,
                 gaussian_pos=gaussian_pos
             )
 
-            # 최종 loss로 교체
+
             metrics["loss"] = adaptive_losses["total_loss"]
 
-            # 모니터링용으로 각 항목도 로깅
+
             metrics.update({
                 "L_RGB": adaptive_losses["L_RGB"],
                 "L_SH_ratio": adaptive_losses["L_SH_ratio"],
@@ -414,10 +419,11 @@ class GaussianSplatting(LightningModule):
                 "L_TV": adaptive_losses["L_TV"],
                 "L_mono": adaptive_losses["L_mono"],
             })
-            # 프로그레스바에 노이즈 없이 몇 개만 노출
+
             prog_bar.update({
                 "L_RGB": False, "L_SH_ratio": False, "L_gate": False, "L_TV": False, "L_mono": False
             })
+
             
 
         self.log_metrics(metrics, prog_bar, prefix="train", on_step=True, on_epoch=False)
@@ -696,14 +702,11 @@ class GaussianSplatting(LightningModule):
         return self.validation_step(batch, batch_idx, name="test")
 
     def configure_optimizers(self):
-        # initialize lists that store optimizers and schedulers
-        optimizers = []
-        schedulers = []
+        # init collectors
+        optimizers, schedulers = [], []
 
         def add_optimizers_and_schedulers(new_optimizers, new_schedulers):
-            nonlocal optimizers
-            nonlocal schedulers
-
+            nonlocal optimizers, schedulers
             if new_optimizers is not None:
                 if isinstance(new_optimizers, list):
                     optimizers += new_optimizers
@@ -714,27 +717,35 @@ class GaussianSplatting(LightningModule):
                     schedulers += new_schedulers
                 else:
                     schedulers.append(new_schedulers)
+        renderer_optimizer, renderer_scheduler = self.renderer.training_setup(self)
+        add_optimizers_and_schedulers(renderer_optimizer, renderer_scheduler)
 
-        # gaussian model optimizer and scheduler setup
+        
         gaussian_optimizers, gaussian_schedulers = self.gaussian_model.training_setup(self)
-        self.gaussian_optimizers = gaussian_optimizers
-        if isinstance(self.gaussian_optimizers, list) is False:
-            self.gaussian_optimizers = [self.gaussian_optimizers]
-        add_optimizers_and_schedulers(gaussian_optimizers, gaussian_schedulers)
-        # add frozen Gaussians
+
+       
+        GAUSS_GROUP_NAMES = {"means", "shs_dc", "shs_rest", "opacities", "scales", "rotations"}
+
+        def is_gaussian_only(opt):
+            names = set(pg.get("name", "") for pg in opt.param_groups)
+            return bool(names) and names.issubset(GAUSS_GROUP_NAMES)
+
+        _all_g_opts = gaussian_optimizers if isinstance(gaussian_optimizers, list) else [gaussian_optimizers]
+        gauss_only_opts = [opt for opt in _all_g_opts if is_gaussian_only(opt)]
+        extra_opts      = [opt for opt in _all_g_opts if not is_gaussian_only(opt)]  
+
+        
+        self.gaussian_optimizers = gauss_only_opts
+
+       
+        add_optimizers_and_schedulers(gauss_only_opts + extra_opts, gaussian_schedulers)
+
+       
         if self.frozen_gaussians is not None:
             from internal.utils.gaussian_containers import HasExtraParameters
             self.gaussian_model.gaussians = HasExtraParameters(self.frozen_gaussians, self.gaussian_model.gaussians)
 
-        # renderer optimizer and scheduler setup
-        renderer_optimizer, renderer_scheduler = self.renderer.training_setup(self)
-        add_optimizers_and_schedulers(renderer_optimizer, renderer_scheduler)
-
-        gaussian_optimizers, gaussian_schedulers = self.gaussian_model.training_setup(self)
-        self.gaussian_optimizers = gaussian_optimizers if isinstance(gaussian_optimizers, list) else [gaussian_optimizers]
-        add_optimizers_and_schedulers(gaussian_optimizers, gaussian_schedulers)
-
-        # metric optimizer and scheduler setup
+        
         metric_optimizer, metric_scheduler = self.metric.training_setup(self)
         add_optimizers_and_schedulers(metric_optimizer, metric_scheduler)
 
