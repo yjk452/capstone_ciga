@@ -32,7 +32,16 @@ import math
 from internal.utils.sh_utils import eval_sh
 from internal.utils.graphics_utils import store_ply
 from internal.models.sh_core import AdaptiveSHLoss
-from internal.renderers.ciga_renderer import CigaRenderer
+#from internal.renderers.ciga_renderer2 import CigaRenderer
+from internal.renderers.sep_depth_trim_2dgs_renderer_ciga import SepDepthTrim2DGSRenderer
+
+from dataclasses import dataclass
+
+@dataclass
+class LogCfg:
+    log: bool = True
+    step: int = 50
+
 
 class GaussianSplatting(LightningModule):
     def __init__(
@@ -49,7 +58,7 @@ class GaussianSplatting(LightningModule):
             save_val_metrics: bool = None,
             max_save_val_output: int = -1,
             #renderer: Union[Renderer, RendererConfig] = lazy_instance(VanillaRenderer),
-            renderer: Union[Renderer, RendererConfig] = lazy_instance(CigaRenderer),
+            renderer: Union[Renderer, RendererConfig] = lazy_instance(SepDepthTrim2DGSRenderer),
             metric: Metric = lazy_instance(VanillaMetrics),
             density: DensityController = lazy_instance(VanillaDensityController),
             save_ply: bool = False,
@@ -183,14 +192,14 @@ class GaussianSplatting(LightningModule):
         self.metric.setup(stage=stage, pl_module=self)
         self.density_controller.setup(stage=stage, pl_module=self)
 
-        # self.adaptive_loss_fn = AdaptiveSHLoss(
-        #             lambda_sh=0.01,   
-        #             lambda_gate=0.001,
-        #             lambda_tv=0.0025,
-        #             lambda_mono=0.005,
+        self.adaptive_loss_fn = AdaptiveSHLoss(
+                    lambda_sh=0.1,   
+                    lambda_gate=0.001,
+                    lambda_tv=0.0025,
+                    lambda_mono=0.2,
             
-        #         ).to(self.device)
-        self.adaptive_loss_fn = None
+                ).to(self.device)
+       # self.adaptive_loss_fn = None
 
 
 
@@ -380,17 +389,43 @@ class GaussianSplatting(LightningModule):
         metrics, prog_bar = self.metric.get_train_metrics(self, self.gaussian_model, global_step, batch, outputs)
         
 
+        if (global_step % 1000) == 0 and getattr(self, "global_rank", 0) == 0:
+            sh_weights = outputs.get("sh_weights", None)
+            shs_raw    = outputs.get("shs_raw", None)
+            shs_gated  = outputs.get("shs_gated", None)
 
-        sh_weights = outputs.get("sh_weights", None)
-        shs_raw    = outputs.get("shs_raw", None)
-               
+            if torch.is_tensor(shs_raw) and torch.is_tensor(shs_gated):
+
+                try:
+                    same_ptr = (shs_raw.data_ptr() == shs_gated.data_ptr())
+                    print(f"[gate_check] step={global_step} same_ptr={same_ptr}")
+                except Exception:
+                    pass
+
+                if shs_raw.shape[-1] == 3:      # [N,K,3]
+                    diff_hi = (shs_gated[:, 1:, :] - shs_raw[:, 1:, :]).abs().mean().item()
+                else:                            # [N,3,K]
+                    diff_hi = (shs_gated[:, :, 1:] - shs_raw[:, :, 1:]).abs().mean().item()
+
+                print(f"[gate_check] step={global_step} sh_diff_hi_mean={diff_hi:.3e}")
+            else:
+                print(f"[gate_check] step={global_step} shs_raw/gated missing")
+
+            if torch.is_tensor(sh_weights):
+                w = sh_weights.detach()
+                print(f"[w_stats] step={global_step} mean={w.mean().item():.3f} "
+                    f"min={w.min().item():.3f} max={w.max().item():.3f} "
+                    f"abs(mean-1)={ (w-1).abs().mean().item():.3f}")
+
+
+          
         can_adapt = (
             "adaptive_sh_info" in outputs
             and "sh_weights" in outputs
             and ("shs_raw" in outputs)   
         )
-
-        if (self.adaptive_loss_fn is not None) and can_adapt:
+        if hasattr(self, "adaptive_loss_fn") and can_adapt:
+        #if (self.adaptive_loss_fn is not None) and can_adapt:
 
             base_l_rgb = metrics["loss"]          # photometric(base)
             shs_raw = outputs["shs_raw"]         
@@ -476,6 +511,7 @@ class GaussianSplatting(LightningModule):
         # invoke other hooks
         for i in self.on_after_backward_hooks:
             i(outputs, batch, self.gaussian_model, global_step, self)
+
 
         # optimize
         for optimizer in optimizers:

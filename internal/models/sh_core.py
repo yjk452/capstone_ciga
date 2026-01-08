@@ -45,21 +45,18 @@ def build_gate_input(
     cos_angle: torch.Tensor,
     *,
     d_low: float = 0.2,
-    d_high: float = 80.0,
+    d_high: float = 30.0,  #80
     d0: float = 5.0,
     dw: float = 0.5,
 ) -> torch.Tensor:
-    """
-    footprint 제거 버전:
-      x = [u(d), v(cos(nadir))]  -> [N,2]
-    """
+
     u = d_to_u(d, d_low=d_low, d_high=d_high, d0=d0, w=dw)  # [N]
     v = cos_to_v(cos_angle)                                  # [N]
     return torch.stack([u, v], dim=-1)                        # [N,2]
 
 
 class GateMLP(nn.Module):
-    def __init__(self, in_dim: int = 2, L_max: int = 3, hidden: int = 64):
+    def __init__(self, in_dim: int = 2, L_max: int = 2, hidden: int = 64):
         super().__init__()
         self.L_max = L_max
         self.net = nn.Sequential(
@@ -71,7 +68,7 @@ class GateMLP(nn.Module):
         )
         # 초기 편향: 고차는 낮게 시작
         with torch.no_grad():
-            self.net[-1].bias[:] = -1.0
+            self.net[-1].bias[:] = 0.5
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: [N,2] = [u, v]
@@ -79,7 +76,7 @@ class GateMLP(nn.Module):
 
 
 class GateLUT(nn.Module):
-    def __init__(self, L_max: int = 3, B_d: int = 32, B_phi: int = 32, ema: float = 0.9, device: str = "cuda"):
+    def __init__(self, L_max: int = 2, B_d: int = 32, B_phi: int = 32, ema: float = 0.9, device: str = "cuda"):
         super().__init__()
         self.L_max = L_max
         self.ema = ema
@@ -106,7 +103,7 @@ class GateLUT(nn.Module):
 
 
 class AdaptiveSHLoss(nn.Module):
-    def __init__(self, lambda_sh=0.05, lambda_gate=0.001, lambda_tv=0.0025, lambda_mono=0.005):
+    def __init__(self, lambda_sh=0.1, lambda_gate=0.001, lambda_tv=0.0025, lambda_mono=0.2):
         super().__init__()
         self.lambda_sh = lambda_sh
         self.lambda_gate = lambda_gate
@@ -323,3 +320,5 @@ def ensure_NKC(shs: torch.Tensor) -> torch.Tensor:
     if A == 3:
         return shs.transpose(1, 2).contiguous()
     raise ValueError(f"expect [N,K,3] or [N,3,K], got {shs.shape}")
+
+
