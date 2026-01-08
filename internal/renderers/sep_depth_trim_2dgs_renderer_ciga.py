@@ -326,7 +326,7 @@ class SepDepthTrim2DGSRendererCiga(Renderer):
 
         d = self.gs.mlp_model.to_input(VC, means3D)
         if self.gs.logs['log']:
-            print_to(self.gs.log_dir, "R_input.txt",f"\nstep: {self.gs.trainer.global_step}\ncam_pos :{d['cam_pos'][:10,:10]}\ncam-gaus: {d['dis'][:10,:10]}\ncam_dir: {d['dir'][:10,:10]}")
+            print_to(self.gs.log_dir, "R_input.txt",f"\nstep: {self.gs.trainer.global_step}\ncam_pos :{d['cam_pos'][:10,:10]}\ndis: {d['dis'][:10,:10]}\ncam_dir: {d['cam-dir'][:10,:10]}")
             log_weight_stats(self.gs.mlp_model, "R_mlp_weight.txt", self.gs.log_dir, step=self.gs.trainer.global_step)
 
         x = torch.cat([d['cam_pos'], d['dis'], d['dir']], dim=1)

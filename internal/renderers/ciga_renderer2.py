@@ -14,9 +14,11 @@ from .renderer import *
 from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
 from internal.utils.sh_utils import eval_sh
 from pathlib import Path
-from internal.models.ciga_mlp import CigaMLP
+
 import torch.nn as nn
-from log import print_to
+from log import print_to, log_weight_stats
+from internal.models.ciga_mlp import CigaMLP
+import weakref
 
 
 class CigaRenderer(Renderer):
@@ -111,15 +113,18 @@ class CigaRenderer(Renderer):
         else:
             colors_precomp = override_color
 
-        # 추가 
-        if self.mlp_model is not None:
+        # partition 오류 수정을 위함
+        gs = getattr(self, "gs", None)
+        mlp_model = getattr(gs, "mlp_model", None) if gs is not None else None
+
+        if mlp_model is not None:
             shs = self.shs_weight_MLP(
-                rasterizer, 
-                shs, 
-                viewpoint_camera, 
-                means3D, 
+                rasterizer,
+                shs,
+                viewpoint_camera,
+                means3D,
                 L=pc.max_sh_degree
-                )
+            )
 
         # Rasterize visible Gaussians to image, obtain their radii (on screen).
         rendered_image, radii = rasterizer(
@@ -242,33 +247,22 @@ class CigaRenderer(Renderer):
 
         assert C == 3 and K == (L + 1) ** 2
 
-        # 가시 가우시안 
-        if isinstance(self.mlp_model, CigaMLP):
-            with torch.no_grad(): vis_mask = rasterizer.markVisible(means3D) # -> (N,) bool 텐서 반환
-            vis_idx = torch.where(vis_mask)[0]
-        else:
-            vis_mask = torch.ones(N, dtype=torch.bool, device=device)
-            vis_idx = torch.arange(N, device=device)
-            
-
-        means3D_vis = means3D[vis_idx]  # 가시 가우시안 좌표
-        shs_vis = shs[vis_idx]  # 가시 가우시안 SH 계수
         
         # sh 가중치(MLP 결과)를 담을 더미 텐서
         sh_weight = torch.zeros(N, L+1, C, device=device, dtype=dtype)
 
-        if isinstance(self.mlp_model, CigaMLP):
-            d = self.mlp_model.to_input(VC, means3D_vis)
-            if self.logging:
-                print_to("input.txt",f"\ncam_pos :{d['cam_pos'][:10,:10]}\ncam-gaus: {d['dis'][:10,:10]}\ncam_dir: {d['dir'][:10,:10]}")
-            x = torch.cat([d['cam_pos'], d['dis'], d['dir']], dim=1)
-            if self.mlp_train:
-                sh_weight = self.mlp_model(x)
-            else:
-                with torch.no_grad():
-                    sh_weight = self.mlp_model(x)
+        d = self.gs.mlp_model.to_input(VC, means3D)
+        if self.gs.logs['log']:
+            print_to(self.gs.log_dir, "R_input.txt",f"\nstep: {self.gs.trainer.global_step}\ncam_pos :{d['cam_pos'][:10,:10]}\ndis: {d['dis'][:10,:10]}\ncam_dir: {d['cam-dir'][:10,:10]}")
+            log_weight_stats(self.gs.mlp_model, "R_mlp_weight.txt", self.gs.log_dir, step=self.gs.trainer.global_step)
+
+        x = torch.cat([d['cam_pos'], d['dis'], d['dir']], dim=1)
+        if self.gs.mlp_train:
+            sh_weight = self.gs.mlp_model(x)
         else:
-            print("CR_shs_weght_MLP")
+            with torch.no_grad():
+                sh_weight = self.gs.mlp_model(x)
+
         
         # 밴드별 가중치를 계수별 가중치로 변환
         sh_weight = self.band_flatten(sh_weight, L)
@@ -278,9 +272,8 @@ class CigaRenderer(Renderer):
         # return    : sh_weight shape   = [gaussian 수, (L+1)^2, 3(RGB)]
         
         shs_out = shs.clone()
-        shs_out[vis_idx] = shs[vis_idx] * sh_weight
-        if self.logging == True:
-            print_to("CR_shape.txt", "\nsh_w: ", sh_weight.shape, "\nshs_vis: ",shs_vis.shape, "\nshs: ", shs.shape, "\nshs_out:", shs_out.shape)
+        shs_out = shs * sh_weight
+        
         return shs_out
 
     def band_flatten(self, sh_weight, L):
@@ -313,3 +306,19 @@ class CigaRenderer(Renderer):
     def set_log(self, tf):
         self.logging = tf
         
+    @property
+    def gs(self):
+        return self._gs_ref()
+    
+    def setup(self, gs):
+        self._gs_ref = weakref.ref(gs)
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        if '_gs_ref' in state:
+            del state['_gs_ref']
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self._gs_ref = None
