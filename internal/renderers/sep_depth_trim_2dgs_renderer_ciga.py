@@ -11,8 +11,7 @@ from ..models.gaussian import GaussianModel
 from diff_trim_surfel_rasterization import GaussianRasterizationSettings, GaussianRasterizer
 
 import torch.nn as nn
-from log import print_to, log_weight_stats
-from internal.models.ciga_mlp import CigaMLP
+from log import print_to
 import weakref
 
 class SepDepthTrim2DGSRendererCiga(Renderer):
@@ -114,7 +113,6 @@ class SepDepthTrim2DGSRendererCiga(Renderer):
                 means3D,
                 L=pc.max_sh_degree
             )
-            
 
         # Rasterize visible Gaussians to image, obtain their radii (on screen).
         output = rasterizer(
@@ -324,13 +322,13 @@ class SepDepthTrim2DGSRendererCiga(Renderer):
         # sh 가중치(MLP 결과)를 담을 더미 텐서
         sh_weight = torch.zeros(N, L+1, C, device=device, dtype=dtype)
 
-        d = self.gs.mlp_model.to_input(VC, means3D)
-        if self.gs.logs['log']:
-            print_to(self.gs.log_dir, "R_input.txt",f"\nstep: {self.gs.trainer.global_step}\ncam_pos :{d['cam_pos'][:10,:10]}\ndis: {d['dis'][:10,:10]}\ncam_dir: {d['cam-dir'][:10,:10]}")
-            log_weight_stats(self.gs.mlp_model, "R_mlp_weight.txt", self.gs.log_dir, step=self.gs.trainer.global_step)
+        x = self.gs.mlp_model.to_input(VC, means3D)
+        print_to("R_input.txt", x[0:5])
+        # if self.gs.logs['log']:
+        #     log_weight_stats(self.gs.mlp_model, "R_mlp_weight.txt", self.gs.log_dir, step=self.gs.trainer.global_step)
 
-        x = torch.cat([d['cam_pos'], d['dis'], d['dir']], dim=1)
-        if self.gs.mlp_train:
+        #x = torch.cat([d['cam_pos'], d['dis'], d['dir']], dim=1)
+        if self.gs.mlp_model.config.train:
             sh_weight = self.gs.mlp_model(x)
         else:
             with torch.no_grad():

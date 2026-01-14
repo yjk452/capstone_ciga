@@ -33,11 +33,9 @@ from internal.utils.sh_utils import eval_sh
 from internal.utils.graphics_utils import store_ply
 
 #ciga
-from internal.models.ciga_mlp import CigaMLP
-from internal.renderers.ciga_trim_renderer import CigaTrimRenderer
-from internal.renderers.ciga_renderer2 import CigaRenderer
+from internal.models.mlp import MLP
 
-from log import log_weight_stats, nuke_dir, print_to
+from log import set_dir, set_flag, print_to, _is_enabled, step_log, log_weight_stats
 from pathlib import Path
 
 class GaussianSplatting(LightningModule):
@@ -62,7 +60,8 @@ class GaussianSplatting(LightningModule):
             initialize_from: str = None,
             overwrite_config: bool = True,
             renderer_output_types: Optional[List[str]] = None,
-            mlp_cfg : Dict[str, Any] = None,
+            mlp: Optional[MLP]=None,
+            mlp_path: Optional[str]=None,
             log_cfg : Dict[str, Any] = None
     ) -> None:
         super().__init__()
@@ -73,49 +72,24 @@ class GaussianSplatting(LightningModule):
         self.gaussian_model = gaussian.instantiate()
         self.frozen_gaussians = None
         
-        # setup log
-        self.log_cfg = self.hparams['log_cfg'] or {}
+        # ciga log
+        self.log_cfg = self.hparams.get("log_cfg") or {}  
+        start_list = self.log_cfg.get("start", [])        
+        if start_list is None:
+            start_list = []
+
         self.logs = {
-            'log':bool(self.log_cfg.get('log', False)),
-            'step':int(self.log_cfg.get('step', 50)),
+            "log": bool(self.log_cfg.get("log", False)),
+            "step": int(self.log_cfg.get("step", 50)),
+            "start": [int(x) for x in start_list],    
         }
+
+        self._log_start_set = set(self.logs["start"])
+        self._log_end_set = set(s + self.logs["step"] for s in self.logs["start"])
 
         # setup MLP
-        self.mlp_cfg = self.hparams['mlp_cfg'] or {}
-        self.mlp = bool(self.mlp_cfg.get('use', False))
-        self.sch = bool(self.mlp_cfg.get('sch', False))
-        self.mlp_options = {
-            'mlp_lr' : float(self.mlp_cfg.get('lr', 5e-3)),
-            'mlp_weight_decay' : float(self.mlp_cfg.get('weight_decay', 0.0)), 
-            'mlp_milestones' : self.mlp_cfg.get('milestones', []),
-            'mlp_gamma' : float(self.mlp_cfg.get('gamma', 0.5)),    
-        }
-        raw_path = self.mlp_cfg.get('path')          
-        self.mlp_train = bool(self.mlp_cfg.get('train', True))
-        self.mlp_path = None
-        if raw_path:
-            self.mlp_path = Path(raw_path).expanduser().resolve()
-            if not self.mlp_path.exists():
-                raise FileNotFoundError(f"[mlp_cfg.path] not found: {self.mlp_path}")
-
-        if self.mlp:
-            self.mlp_model = CigaMLP.instantiate(
-                in_features=7,
-                sh_max_degree = self.gaussian_model.get_max_sh_degree()
-            )
-            if self.mlp_path is not None:
-                params = torch.load(self.mlp_path)
-                self.mlp_model.load_state_dict(params, strict=self.mlp_cfg.get('strict', True))
-                if self.mlp_train:
-                    for param in self.mlp_model.parameters():
-                        param.requires_grad = True
-                    self.mlp_model.train()
-                else:
-                    for param in self.mlp_model.parameters():
-                        param.requires_grad = False
-                    self.mlp_model.eval()
-        else:
-            self.mlp_model=None
+        if mlp is not None:
+            self.mlp_model = mlp.instantiate()
 
         self.light_gaussian_hparams = light_gaussian
         
@@ -228,12 +202,18 @@ class GaussianSplatting(LightningModule):
                 self.hparams["save_val_metrics"] = True
 
         #ciga
+        if self.mlp_model is not None:
+            self.mlp_model.set_bbox(self.gaussian_model.get_xyz)
+
         if self.hparams["max_save_val_output"] > 0:
             self.hparams["save_val_output"]=True
 
         if self.logs['log']:
             self.log_dir = os.path.join(self.hparams["output_path"], "log")
             os.makedirs(self.log_dir, exist_ok=True)
+            set_dir(self.log_dir)
+            set_flag(False)
+
 
         self.renderer.setup(gs=self)
         self.metric.setup(stage=stage, pl_module=self)
@@ -443,10 +423,17 @@ class GaussianSplatting(LightningModule):
                 step=self.trainer.global_step,
             )
 
-        if self.trainer.global_step > self.logs['step'] and self.logs['log']:
-            self.logs['log'] = False
-        if self.logs['log']:
-            log_weight_stats(self.mlp_model, "GS_mlp_weight.txt", self.log_dir, step=self.trainer.global_step)
+        if self.logs["log"]:
+            step_now = int(self.trainer.global_step) 
+            if step_now in self._log_start_set:
+                set_flag(True)
+            elif step_now in self._log_end_set:
+                set_flag(False)
+            if _is_enabled():
+                step_log(step_now)
+    
+        log_weight_stats(self.mlp_model, "GS_mlp_params.txt")
+
             
             
 
@@ -686,12 +673,11 @@ class GaussianSplatting(LightningModule):
         테스트가 시작될 때(체크포인트 로딩 직후) 호출됩니다.
         CLI에서 지정한 MLP 경로가 있다면, 체크포인트 값을 무시하고 해당 파일로 덮어씁니다.
         """
-        # 1. mlp_cfg 설정 가져오기
-        mlp_cfg = self.hparams.get("mlp_cfg", {})
-        target_mlp_path = mlp_cfg.get("path", None)
+        # 1. mlp_path
+        target_mlp_path = self.hparams.get("mlp_path", {})
         
         # 2. 로드할 경로가 있고, 모델에 MLP가 활성화되어 있다면 재로딩 수행
-        if target_mlp_path is not None and getattr(self, "mlp", False) and getattr(self, "mlp_model", None) is not None:
+        if target_mlp_path is not None:
             print(f"\n[INFO] on_test_start: Overriding MLP weights from {target_mlp_path}")
             
             try:
@@ -796,21 +782,15 @@ class GaussianSplatting(LightningModule):
         # metric optimizer and scheduler setup
         metric_optimizer, metric_scheduler = self.metric.training_setup(self)
         add_optimizers_and_schedulers(metric_optimizer, metric_scheduler)
-        if self.mlp and self.mlp_train:
-            mlp_optimizer = torch.optim.Adam(
-                self.mlp_model.parameters(), 
-                lr=self.mlp_options['mlp_lr'], 
-                weight_decay=self.mlp_options['mlp_weight_decay']
-                )
-            mlp_scheduler = torch.optim.lr_scheduler.MultiStepLR(
-                mlp_optimizer, 
-                milestones=self.mlp_options['mlp_milestones'], 
-                gamma=self.mlp_options['mlp_gamma']
-                )
-            add_optimizers_and_schedulers(
-                mlp_optimizer if self.mlp else None, 
-                mlp_scheduler if self.sch else None
-                )
+
+        if self.mlp_model is not None:
+            has_trainable = any(p.requires_grad for p in self.mlp_model.parameters())
+            if has_trainable:
+                opt, sch = self.mlp_model.training_setup(self)
+                add_optimizers_and_schedulers(
+                    opt, 
+                    sch
+                    )
 
         return optimizers, schedulers
 
@@ -861,7 +841,7 @@ class GaussianSplatting(LightningModule):
             ), xyz.cpu().numpy(), ((rgb + 0.5).clamp(min=0., max=1.) * 255).to(torch.int).cpu().numpy())
         ckpt_mlp_dir = os.path.join(self.hparams["output_path"], "checkpoints_mlp")
         os.makedirs(ckpt_mlp_dir, exist_ok=True)
-        if self.mlp:
+        if self.mlp_model is not None:
             mlp_path = os.path.join(
                 ckpt_mlp_dir,
                 "epoch={}-step={}{}-mlp.pt".format(
@@ -887,7 +867,7 @@ class GaussianSplatting(LightningModule):
     def _on_device_updated(self):
         self.metric.on_parameter_move(device=self.device)
         self.set_datamodule_device(self.device)
-        if self.mlp:
+        if self.mlp_model is not None:
             self.mlp_model = self.mlp_model.to(self.device)
     def to(self, *args: Any, **kwargs: Any) -> Self:
         super().to(*args, **kwargs)

@@ -1,0 +1,42 @@
+model:
+  save_val_output: true
+  save_val_metrics: true
+  max_save_val_output: 32
+  renderer_output_types: null
+  log_cfg:
+    log: true
+    step: 10
+    start: [100, 14995, 20000]
+  mlp:
+    class_path: internal.models.ciga_mlp_v1.CigaMLPV1
+    # class_path: internal.models.ciga_mlp_v2.CigaMLPV2
+    init_args:
+      train: true
+  gaussian:
+    class_path: internal.models.gaussian_2d.Gaussian2D
+    init_args:
+      sh_degree: 2
+  metric:
+    class_path: internal.metrics.citygsv2_metrics.CityGSV2Metrics
+    init_args:
+      lambda_normal: 0.0125
+      depth_loss_type: l1+ssim
+      depth_loss_ssim_weight: 1.0
+      depth_loss_weight:
+        init: 0.5
+        final_factor: 0.005
+  renderer: 
+    class_path: internal.renderers.sep_depth_trim_2dgs_renderer_ciga.SepDepthTrim2DGSRendererCiga
+    init_args:
+      depth_ratio: 1.0
+      diable_trimming: true
+  density: internal.density_controllers.citygsv2_density_controller.CityGSV2DensityController
+trainer:
+  check_val_every_n_epoch: 20
+  max_steps: 30000
+data:
+  path: /home/yeonchanheum/data/dataset/SF/traina20g1.8
+  parser:
+    class_path: EstimatedDepthBlockColmap
+    init_args:
+      down_sample_factor: 1.0
