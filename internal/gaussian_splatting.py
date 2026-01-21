@@ -158,6 +158,23 @@ class GaussianSplatting(LightningModule):
     def _initialize_gaussians_from_trained_model(self):
         # assert self.hparams["gaussian"].extra_feature_dims == 0
 
+        # ciga~
+        ckpt = torch.load(self.hparams["initialize_from"], map_location="cpu")
+        sd = ckpt.get("state_dict", {})
+        try:
+            if "mlp_model.bbox_ready" in sd:
+                # 텐서의 값을 직접 복사 (.copy_ 또는 .data 사용)
+                self.mlp_model.bbox_ready.copy_(sd["mlp_model.bbox_ready"].data.to(self.device))
+                
+            if "mlp_model.pos_min" in sd:
+                self.mlp_model.pos_min.copy_(sd["mlp_model.pos_min"].data.to(self.device))
+
+            if "mlp_model.pos_max" in sd:
+                self.mlp_model.pos_max.copy_(sd["mlp_model.pos_max"].data.to(self.device))
+        except:
+            print("GS._initialize_gaussians_from_trained_model > bbox not ready")
+        # ~ciga
+
         from internal.utils.gaussian_model_loader import GaussianModelLoader
         load_from = GaussianModelLoader.search_load_file(self.hparams["initialize_from"])
         
@@ -201,9 +218,13 @@ class GaussianSplatting(LightningModule):
             if self.hparams["save_val_metrics"] is None:
                 self.hparams["save_val_metrics"] = True
 
-        #ciga
         if self.mlp_model is not None:
-            self.mlp_model.set_bbox(self.gaussian_model.get_xyz)
+            try:
+                if not self.mlp_model.bbox_ready:
+                    self.mlp_model.set_bbox(self.gaussian_model.get_xyz)
+            except:
+                print_to("error.txt", "GS.setup > bbox not ready")
+            
 
         if self.hparams["max_save_val_output"] > 0:
             self.hparams["save_val_output"]=True
@@ -379,6 +400,13 @@ class GaussianSplatting(LightningModule):
         return super().on_train_batch_start(batch, batch_idx)
 
     def training_step(self, batch, batch_idx):
+        if self.trainer.global_step == 1:
+            print("trainer.global_step =", self.trainer.global_step, "global_step(+1) =", self.trainer.global_step + 1,
+            "renderer =", type(self.renderer).__name__,
+            "disable_start =", getattr(self.renderer, "diable_start_trimming", None),
+            "disable_trim =", getattr(self.renderer, "diable_trimming", None))
+
+
         camera, image_info, _ = batch
         # image_name, gt_image, masked_pixels = image_info
 
@@ -397,7 +425,11 @@ class GaussianSplatting(LightningModule):
         # checkpoint will always be saved after final step, so do not save for final step here
         if global_step in self.hparams["save_iterations"] and self.is_final_step(global_step) is False and self.trainer.global_step != self.restored_global_step:
             self.save_gaussians()
-
+        try:
+            if global_step == self.mlp_model.step:
+                self.mlp_model.set_active(True)
+        except:
+            pass
         # call renderer hook
         self.renderer.before_training_step(global_step, self)
 
@@ -741,6 +773,8 @@ class GaussianSplatting(LightningModule):
                 traceback.print_exc()
 
     def test_step(self, batch, batch_idx):
+        set_flag(True)
+        log_weight_stats(self.mlp_model, "test.txt")
         return self.validation_step(batch, batch_idx, name="test")
 
     def configure_optimizers(self):

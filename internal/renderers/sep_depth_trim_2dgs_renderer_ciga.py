@@ -328,12 +328,13 @@ class SepDepthTrim2DGSRendererCiga(Renderer):
         #     log_weight_stats(self.gs.mlp_model, "R_mlp_weight.txt", self.gs.log_dir, step=self.gs.trainer.global_step)
 
         #x = torch.cat([d['cam_pos'], d['dis'], d['dir']], dim=1)
-        if self.gs.mlp_model.config.train:
+        if not self.gs.mlp_model.config.freeze:
             sh_weight = self.gs.mlp_model(x)
         else:
             with torch.no_grad():
                 sh_weight = self.gs.mlp_model(x)
-            
+        
+        print_to("R_output.txt", sh_weight[0:5])
         
         # 밴드별 가중치를 계수별 가중치로 변환
         sh_weight = self.band_flatten(sh_weight, L)

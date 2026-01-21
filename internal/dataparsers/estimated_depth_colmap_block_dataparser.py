@@ -57,7 +57,7 @@ class EstimatedDepthBlockColmapDataParser(ColmapBlockDataParser):
                 loaded_depth_count += 1
             image_set.extra_data_processor = self.load_depth
 
-        assert loaded_depth_count > 0
+        #assert loaded_depth_count > 0
         print("found {} depth maps".format(loaded_depth_count))
 
         return dataparser_outputs

@@ -134,7 +134,7 @@ if __name__ == "__main__":
     parser.add_argument("--project_name", "-p", type=str, required=True)
     parser.add_argument("--dry-run", action="store_true", default=False)
 
-    MIN_FREE_MIB = 10000
+    MIN_FREE_MIB = 15000
 
     args, training_and_srun_args = parser_stoppable_args(parser)
     training_args, srun_args = split_stoppable_args(training_and_srun_args)
@@ -168,7 +168,7 @@ if __name__ == "__main__":
 
                 executor.submit(train_a_partition, args, training_args, srun_args, block_id, np.argmax(selected_gpu))
 
-                subprocess.run(["sleep", "60"])
+                subprocess.run(["sleep", "240"])
     else:
         print("SLURM mode enabled")
         trainable_partition_idx_list = list(range(num_blocks))

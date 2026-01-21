@@ -48,3 +48,4 @@ class CigaMLP(nn.Module):
     dir = F.normalize(dir, dim=0)
     dir = F.normalize(gaussian_pos - cam_pos, dim=1)
     return {'cam_pos': cam_pos, 'dis': dis, 'dir': dir}
+

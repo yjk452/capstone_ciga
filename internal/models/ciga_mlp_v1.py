@@ -17,14 +17,6 @@ class MLPOptimizationConfig:
     weight_decay: float = 0.0
     milestones: List[int] = field(default_factory=list)
     gamma: float = 0.5
-    optimizer: OptimizerConfig = field(default_factory=lambda: {"class_path": "Adam"})
-    lr_scheduler: Optional[Scheduler] = field(default_factory=lambda: {
-        "class_path": "ExponentialDecayScheduler",
-        "init_args": {
-            "lr_final": 1e-5,
-            "max_steps": 30_000,
-        },
-    })
 
 @dataclass
 class CigaMLPV1(MLP):
@@ -32,13 +24,30 @@ class CigaMLPV1(MLP):
     hidden: int = 64
     out_features: int = 4  
     sh_degree: int = 2
-    train: bool = True
     optimization: MLPOptimizationConfig = field(default_factory=lambda: MLPOptimizationConfig())
+    ckpt_path: Optional[str] = None
+    freeze: bool = False
 
     def instantiate(self, *args, **kwargs) -> "CigaMLPV1Model":
         model = CigaMLPV1Model(config=self, sh_degree=self.sh_degree)
 
-        if not self.train:
+        if self.ckpt_path:
+            ckpt = torch.load(self.ckpt_path, map_location="cpu")
+            state = ckpt.get("state_dict", ckpt)
+
+            cleaned = {}
+            for k, v in state.items():
+                if k.startswith("mlp_model."):
+                    cleaned[k[len("mlp_model."):]] = v
+                elif k.startswith("model."):
+                    cleaned[k[len("model."):]] = v
+                else:
+                    cleaned[k] = v
+
+            missing, unexpected = model.load_state_dict(cleaned, strict=False)
+            print(f"[MLP] loaded from {self.ckpt_path} (missing={len(missing)}, unexpected={len(unexpected)})")
+
+        if self.freeze:
             for p in model.parameters():
                 p.requires_grad_(False)
 
@@ -76,23 +85,26 @@ class CigaMLPV1Model(MLPModel):
     def training_setup(self, pl_module)-> Tuple[Optional[OptimizerType], Optional[SchedulerType]]:
         opt_cfg = self.config.optimization
 
-        # OptimizerConfig가 내부적으로 instantiate를 제공한다고 가정(gaussian 쪽 패턴과 동일)
-        # 만약 OptimizerConfig 구현이 다르면 여기만 프로젝트에 맞게 조정하면 됨.
-        optimizer = opt_cfg.optimizer.instantiate(
-            params=self.parameters(),
-            lr=opt_cfg.lr,
-            weight_decay=opt_cfg.weight_decay,
-        ) if hasattr(opt_cfg.optimizer, "instantiate") else torch.optim.Adam(
-            self.parameters(), lr=opt_cfg.lr, weight_decay=opt_cfg.weight_decay
+        mlp_optimizer = torch.optim.Adam(
+            self.parameters(),
+            lr=float(opt_cfg.lr),
+            weight_decay=float(opt_cfg.weight_decay),
         )
 
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(
-            optimizer,
-            milestones=opt_cfg.milestones,
-            gamma=opt_cfg.gamma,
+        mlp_scheduler = torch.optim.lr_scheduler.MultiStepLR(
+            mlp_optimizer,
+            milestones=list(opt_cfg.milestones),
+            gamma=float(opt_cfg.gamma),
         )
 
-        return optimizer, scheduler
+        scheduler_cfg = {
+            "scheduler": mlp_scheduler,
+            "interval": "step",   # 중요: per-step으로 맞추기
+            "frequency": 1,
+        }
+
+        return mlp_optimizer, scheduler_cfg
+    
     def set_bbox(self, *args):
         pass
     

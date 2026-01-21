@@ -116,15 +116,12 @@ class CigaRenderer(Renderer):
         # partition 오류 수정을 위함
         gs = getattr(self, "gs", None)
         mlp_model = getattr(gs, "mlp_model", None) if gs is not None else None
-
+        print_to("R_no_wshs.txt", shs[10:15, :, :], shs.shape)
         if mlp_model is not None:
-            shs = self.shs_weight_MLP(
-                rasterizer,
-                shs,
-                viewpoint_camera,
-                means3D,
-                L=pc.max_sh_degree
-            )
+            w_shs = self.gs.mlp_model(viewpoint_camera,means3D)
+            shs = shs * w_shs
+            print_to("R_wshs.txt", w_shs[10:15, :, :], w_shs.shape)
+            print_to("R_shs.txt", shs[10:15, :, :], shs.shape)
 
         # Rasterize visible Gaussians to image, obtain their radii (on screen).
         rendered_image, radii = rasterizer(
@@ -147,9 +144,6 @@ class CigaRenderer(Renderer):
             "radii": radii,
         }
 
-    def set_mlp(self, mlp: nn.Module, mlp_train):
-        self.mlp_model = mlp
-        self.mlp_train = mlp_train
 
     @staticmethod
     def render(
@@ -234,77 +228,6 @@ class CigaRenderer(Renderer):
             "rgb": RendererOutputInfo("render"),
             "depth": RendererOutputInfo("depth", RendererOutputTypes.GRAY),
         }
-
-    def shs_weight_MLP(self, rasterizer, shs, VC, means3D, L):
-        """
-        가시 가우시안들에 대해 MLP로 sh 가중치 예측. 이후 sh 계수에 가중치를 곱해 반환
-        """
-        if shs is None:
-            return shs
-
-        N, K, C = shs.shape
-        device, dtype = shs.device, shs.dtype
-
-        assert C == 3 and K == (L + 1) ** 2
-
-        
-        # sh 가중치(MLP 결과)를 담을 더미 텐서
-        sh_weight = torch.zeros(N, L+1, C, device=device, dtype=dtype)
-
-        d = self.gs.mlp_model.to_input(VC, means3D)
-        if self.gs.logs['log']:
-            print_to(self.gs.log_dir, "R_input.txt",f"\nstep: {self.gs.trainer.global_step}\ncam_pos :{d['cam_pos'][:10,:10]}\ndis: {d['dis'][:10,:10]}\ncam_dir: {d['cam-dir'][:10,:10]}")
-            log_weight_stats(self.gs.mlp_model, "R_mlp_weight.txt", self.gs.log_dir, step=self.gs.trainer.global_step)
-
-        x = torch.cat([d['cam_pos'], d['dis'], d['dir']], dim=1)
-        if self.gs.mlp_train:
-            sh_weight = self.gs.mlp_model(x)
-        else:
-            with torch.no_grad():
-                sh_weight = self.gs.mlp_model(x)
-
-        
-        # 밴드별 가중치를 계수별 가중치로 변환
-        sh_weight = self.band_flatten(sh_weight, L)
-        # sh 계수와 가중치 곱 (MLP 출력 형태에 따라 연산 수정 필요)
-        # in        : sh_weight shape   = [가시 가우시안 수, L+1] : L=sh_max_degree
-        #         ▼ band_flatten
-        # return    : sh_weight shape   = [gaussian 수, (L+1)^2, 3(RGB)]
-        
-        shs_out = shs.clone()
-        shs_out = shs * sh_weight
-        
-        return shs_out
-
-    def band_flatten(self, sh_weight, L):
-        """
-        sh_weight: [N, L+1]
-        반환:      [N, (L+1)^2, 3]
-        """
-        import torch
-
-        N, B = sh_weight.shape
-        assert B == L + 1, f"got {sh_weight.shape}, expected [N,{L+1},3]"
-
-        # 각 밴드의 계수 개수: 2l+1  (0차:1, 1차:3, ..., L차:2L+1)
-        band_sizes = torch.tensor([2 * l + 1 for l in range(L + 1)],
-                                device=sh_weight.device)
-
-        # 길이 K=((L+1)^2) 벡터: 각 계수 k가 어느 밴드에 속하는지 (0..L)
-        band_of_coeff = torch.repeat_interleave(
-            torch.arange(L + 1, device=sh_weight.device),
-            band_sizes
-        )  # [K]
-
-        # 밴드 축(dim=1) 기준으로 인덱싱 → [N, K, 3]
-        weights_coeff = sh_weight.index_select(dim=1, index=band_of_coeff)
-        
-        weights_coeff = weights_coeff.unsqueeze(-1).expand(-1, -1, 3)
-
-        return weights_coeff
-
-    def set_log(self, tf):
-        self.logging = tf
         
     @property
     def gs(self):
@@ -322,3 +245,4 @@ class CigaRenderer(Renderer):
     def __setstate__(self, state):
         self.__dict__.update(state)
         self._gs_ref = None
+    
