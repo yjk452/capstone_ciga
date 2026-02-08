@@ -781,7 +781,7 @@ class GaussianSplatting(LightningModule):
         # initialize lists that store optimizers and schedulers
         optimizers = []
         schedulers = []
-
+        print_to("GS_mlp_opt", self.mlp_model, len(optimizers))
         def add_optimizers_and_schedulers(new_optimizers, new_schedulers):
             nonlocal optimizers
             nonlocal schedulers
@@ -826,6 +826,7 @@ class GaussianSplatting(LightningModule):
                     sch
                     )
 
+        print_to("GS_mlp_opt", self.mlp_model, len(optimizers))
         return optimizers, schedulers
 
     def density_updated_by_renderer(self):

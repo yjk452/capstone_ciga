@@ -67,8 +67,8 @@ def get_scales(key, cameras, images, points3d_ordered, points3d_error_ordered, a
     pts = np.dot(pts, R.T) + image_meta.tvec
 
     invcolmapdepth = 1. / pts[..., 2]
-    invmonodepthmap = np.load(os.path.join(args.depth_dir, "{}.npy".format(image_meta.name)))  # already normalized
-
+    #invmonodepthmap = np.load(os.path.join(args.depth_dir, "{}.npy".format(image_meta.name)))  # already normalized
+    invmonodepthmap = np.load(os.path.join(args.depth_dir, "{}.npy".format(os.path.basename(image_meta.name))))
     if invmonodepthmap is None:
         return None
 

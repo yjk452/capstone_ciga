@@ -122,11 +122,6 @@ class CigaMLPV2Model(MLPModel):
         nn.init.zeros_(self.output_layer.weight)
         nn.init.zeros_(self.output_layer.bias)
 
-    # def forward(self, x) -> torch.Tensor:
-    #     delta = self.mlp(x)
-    #     w_band = torch.exp(self.s * torch.tanh(delta))
-    #     return w_band
-
     def forward(self, x) -> torch.Tensor:
         if self.is_active:
             h = self.input_layer(x)

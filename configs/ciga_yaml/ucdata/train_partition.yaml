@@ -45,7 +45,7 @@ model:
       densification_interval: 200
       opacity_reset_interval: 6000
       densify_from_iter: 1000
-      densify_until_iter: 30_000
+      densify_until_iter: 15_000
 trainer:
   check_val_every_n_epoch: 20
   max_steps: 30000

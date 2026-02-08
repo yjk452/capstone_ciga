@@ -78,6 +78,9 @@ if __name__ == "__main__":
         stage="validate",
         device=device,
     )
+    # 추가
+    renderer.setup(gs=model)
+
     print("Gaussian count: {}".format(model.get_xyz.shape[0]))
 
     traj_dir = os.path.join(ckpt["datamodule_hyper_parameters"]["path"], 'traj')
