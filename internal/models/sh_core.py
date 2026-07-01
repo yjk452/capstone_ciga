@@ -68,7 +68,7 @@ class GateMLP(nn.Module):
         )
         # 초기 편향: 고차는 낮게 시작
         with torch.no_grad():
-            self.net[-1].bias[:] = 0.5
+            self.net[-1].bias[:] = 0.0
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: [N,2] = [u, v]
@@ -284,17 +284,6 @@ def apply_adaptive_sh_weights(shs: torch.Tensor, sh_weights: torch.Tensor, L: in
     return shs * coeff_w
 
 
-def compute_nadir_angle(camera_pos: torch.Tensor, gaussian_pos: torch.Tensor) -> torch.Tensor:
-    """Returns: [N] nadir angle in [0, pi]"""
-    view_dirs = gaussian_pos - camera_pos.unsqueeze(0)
-    view_dirs = F.normalize(view_dirs, dim=-1)
-
-    down_dir = torch.tensor([0.0, 0.0, -1.0], device=view_dirs.device)
-    cos_angle = torch.sum(view_dirs * down_dir.unsqueeze(0), dim=-1)
-    nadir_angles = torch.acos(torch.clamp(cos_angle, -1.0, 1.0))
-    return nadir_angles
-
-
 def compute_nadir_cos_angle(camera_pos: torch.Tensor, gaussian_pos: torch.Tensor) -> torch.Tensor:
     """Returns: [N] cos(nadir_angle) in [-1,1]"""
     view_dirs = gaussian_pos - camera_pos.unsqueeze(0)
@@ -320,5 +309,3 @@ def ensure_NKC(shs: torch.Tensor) -> torch.Tensor:
     if A == 3:
         return shs.transpose(1, 2).contiguous()
     raise ValueError(f"expect [N,K,3] or [N,3,K], got {shs.shape}")
-
-
