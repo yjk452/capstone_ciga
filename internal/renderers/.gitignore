@@ -31,3 +31,4 @@
 !appearance_2dgs_renderer.py
 !taming_3dgs_renderer.py
 !ciga_renderer2.py
+!sep_depth_trim_2dgs_renderer_ciga.py

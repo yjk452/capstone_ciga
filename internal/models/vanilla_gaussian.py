@@ -330,17 +330,6 @@ class VanillaGaussianModel(
                 self._add_optimizer_after_backward_hook_if_available(gate_optimizer, module)
                 print(f"  gate_mlp={gate_lr}")
 
-                def _debug_gate_grad(outputs, batch, gaussian_model, global_step, pl_module):
-                    renderer2 = getattr(pl_module, "renderer", None) or getattr(self, "renderer", None)
-                    if renderer2 is None:
-                        print("[after_backward] renderer is None")
-                        return
-                    for n, p in renderer2.named_parameters():
-                        if "gate" in n or "mlp" in n:
-                            g = None if p.grad is None else float(p.grad.abs().mean().detach().cpu())
-                            print(f"[after_backward] {n} grad_mean={g}")
-                            break
-
             else:
                 for p in gate_params:
                     p.requires_grad_(False)
@@ -350,38 +339,8 @@ class VanillaGaussianModel(
         optimizers = [means_optimizer, constant_lr_optimizer]
         if gate_optimizer is not None:
             optimizers.append(gate_optimizer)
-
-
-
-        def _debug_mlp_grad(outputs, batch, gaussian_model, global_step, pl_module):
-           
-            if global_step % 1500 != 0:
-                return
-
-            renderer = getattr(pl_module, "renderer", None)
-            if renderer is None:
-                print("[MLP grad mean] pl_module has no renderer")
-                return
-
-            mlp = getattr(renderer, "mlp_model", None) or getattr(renderer, "mlp", None)
-            if mlp is None:
-                print("[MLP grad mean] renderer has no mlp_model/mlp")
-                return
-
-            total = 0.0
-            cnt = 0
-            for n, p in mlp.named_parameters():
-                if p.grad is not None:
-                    total += p.grad.detach().abs().mean().item()
-                    cnt += 1
-
-            print("[MLP grad mean]", total / max(cnt, 1), "cnt", cnt)
-
-
-        module.on_after_backward_hooks.append(_debug_mlp_grad)
-
         return optimizers, [means_scheduler]
-    
+
 
 
     def get_property_names(self) -> Tuple[str, ...]:
@@ -395,7 +354,6 @@ class VanillaGaussianModel(
             return
         self._active_sh_degree += 1
 
-        
         lut_cfg = getattr(self.config, "inference", None)
         lut_switch_step = None
         if lut_cfg is not None:
@@ -411,8 +369,6 @@ class VanillaGaussianModel(
                 self._lut_switched = True
                 if hasattr(module, "log"):
                     module.log("info/lut_switched_at", float(step))
-
-
 
 
 

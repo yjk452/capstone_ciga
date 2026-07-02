@@ -1,4 +1,5 @@
 
+
 import math
 from typing import Optional, Dict
 
@@ -40,7 +41,6 @@ class CigaRenderer(Renderer):
 
         L_max = sh_max_degree if sh_max_degree is not None else 3
 
-        # footprint 제거 => 기본 in_dim=2
         in_dim = self.mlp_cfg.get("in_dim", 2)
         hidden = self.mlp_cfg.get("hidden", 64)
 
@@ -154,7 +154,7 @@ class CigaRenderer(Renderer):
             shs=shs,
             VC=viewpoint_camera,
             means3D=means3D,
-            scales=scales, 
+            scales=scales,  # 지금은 내부에서 안 씀(호환용)
             L=pc.active_sh_degree,
         )
 
@@ -326,10 +326,10 @@ class CigaRenderer(Renderer):
         elif cam.ndim != 1:
             cam = cam.view(-1)[:3]
 
-
+        
         d = compute_distance(cam, means3D_vis)                 # [M]
         cos_angle = compute_nadir_cos_angle(cam, means3D_vis)  # [M]
-        x = build_gate_input(d, cos_angle, d_low=0.2, d_high=80.0, d0=5.0, dw=1.0)  # [M,2]
+        x = build_gate_input(d, cos_angle, d_low=0.2, d_high=30.0, d0=5.0, dw=0.5)  # [M,2]
 
         use_mlp = (self.mlp_model is not None)
         if use_mlp and L_active >= 0:
@@ -372,5 +372,8 @@ class CigaRenderer(Renderer):
         shs_out_nkc = shs_nkc.clone()
         shs_out_nkc[vis_idx] = shs_out_nkc[vis_idx] * w_safe.to(dtype=dtype, device=device)
 
-        self._last_band_w = (band_w_full.detach(), vis_idx, L_full)
+        self._last_band_w = (band_w_full, vis_idx, L_full)
         return shs_out_nkc if orig_is_NKC else shs_out_nkc.permute(0, 2, 1).contiguous()
+
+
+

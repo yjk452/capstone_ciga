@@ -29,29 +29,42 @@ file_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
 logger.addHandler(stdout_handler)
 
+
 # find max iteration
 logger.info("Searching checkpoint files...")
 max_iteration = -1
 checkpoint_files = []
-for i in os.listdir(checkpoint_dir):
-    block_path = os.path.join(checkpoint_dir, i)
-    loadable_file = GaussianModelLoader.search_load_file(block_path)
-    if loadable_file.endswith(".ckpt") is False:
+
+for block_name in os.listdir(checkpoint_dir):
+    
+    block_ckpt_dir = os.path.join(checkpoint_dir, block_name, "checkpoints")
+    if not os.path.isdir(block_ckpt_dir):
         continue
-    try:
-        step = int(loadable_file[loadable_file.index("step=") + 5:loadable_file.index(".ckpt")])
+
+    for fname in os.listdir(block_ckpt_dir):
+        # ckpt 파일만 사용
+        if not fname.endswith(".ckpt") or "step=" not in fname:
+            continue
+
+        try:
+            step_str = fname[fname.index("step=") + 5 : fname.index(".ckpt")]
+            step = int(step_str)
+        except Exception:
+            continue
+
+        full_path = os.path.join(block_ckpt_dir, fname)
+
         if step > max_iteration:
             max_iteration = step
-            checkpoint_files = []
-        if step == max_iteration:
-            checkpoint_files.append(loadable_file)
-    except:
-        pass
+            checkpoint_files = [full_path]
+        elif step == max_iteration:
+            checkpoint_files.append(full_path)
 
 checkpoint_files = sorted(checkpoint_files)
-assert len(checkpoint_files) > 0
+assert len(checkpoint_files) > 0, f"No .ckpt files found under {checkpoint_dir}"
 
 logger.info(checkpoint_files)
+
 
 import add_pypath
 import torch

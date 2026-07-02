@@ -32,7 +32,6 @@ import math
 from internal.utils.sh_utils import eval_sh
 from internal.utils.graphics_utils import store_ply
 from internal.models.sh_core import AdaptiveSHLoss
-#from internal.renderers.ciga_renderer2 import CigaRenderer
 from internal.renderers.sep_depth_trim_2dgs_renderer_ciga import SepDepthTrim2DGSRenderer
 
 from dataclasses import dataclass
@@ -57,7 +56,6 @@ class GaussianSplatting(LightningModule):
             save_val_output: bool = False,
             save_val_metrics: bool = None,
             max_save_val_output: int = -1,
-            #renderer: Union[Renderer, RendererConfig] = lazy_instance(VanillaRenderer),
             renderer: Union[Renderer, RendererConfig] = lazy_instance(SepDepthTrim2DGSRenderer),
             metric: Metric = lazy_instance(VanillaMetrics),
             density: DensityController = lazy_instance(VanillaDensityController),
@@ -115,7 +113,7 @@ class GaussianSplatting(LightningModule):
         self.on_train_batch_end_hooks: List[Callable[[Dict, Any, GaussianModel, int, Self], None]] = []
 
 
-        #self.adaptive_loss_fn = AdaptiveSHLoss(**config.adaptive_loss_params) 
+
 
 
     def log_metrics(
@@ -143,15 +141,12 @@ class GaussianSplatting(LightningModule):
     def _random_background_color(self):
         return torch.rand(3)
 
-    def _initialize_gaussians_from_trained_model(self):
-        # assert self.hparams["gaussian"].extra_feature_dims == 0
-
+    def _initialize_gaussians_from_trained_model(self): # mlp파라미터불러오기
         from internal.utils.gaussian_model_loader import GaussianModelLoader
         load_from = GaussianModelLoader.search_load_file(self.hparams["initialize_from"])
 
-        # TODO: may be should adapt sh_degree of ply or checkpoint to current value?
-        if load_from.endswith(".ply") is True:
-            from internal.utils.gaussian_utils import Gaussian as GaussianUtils
+        # 1) gaussian 로딩
+        if load_from.endswith(".ply"):
             gaussian_model, _ = GaussianModelLoader.initialize_model_and_renderer_from_ply_file(
                 ply_file_path=load_from,
                 device=self.device,
@@ -159,7 +154,6 @@ class GaussianSplatting(LightningModule):
                 pre_activate=False,
             )
         else:
-            # load from ckpt
             gaussian_model, _, _ = GaussianModelLoader.initialize_model_and_renderer_from_checkpoint_file(
                 load_from,
                 device=self.device,
@@ -176,7 +170,46 @@ class GaussianSplatting(LightningModule):
             self.gaussian_model = gaussian_model
             self.gaussian_model.config = org_config
 
-        print(f"initialize from {load_from}: sh_degree={self.gaussian_model.max_sh_degree}, overwrite_config={self.hparams['overwrite_config']}")
+        # 2) ckpt weight도 같이 로드
+        if (not load_from.endswith(".ply")) and (self.renderer is not None):
+            ckpt = torch.load(load_from, map_location="cpu")
+            sd = ckpt.get("state_dict", ckpt)  # 혹시 state_dict 없이 저장된 경우도 대비
+
+            # (A) renderer.* 전체를 현재 self.renderer에 로드
+            renderer_sd = {}
+            for k, v in sd.items():
+                if k.startswith("renderer."):
+                    renderer_sd[k[len("renderer."):]] = v
+
+            if len(renderer_sd) > 0:
+                missing, unexpected = self.renderer.load_state_dict(renderer_sd, strict=False)
+                print(
+                    f"[init] loaded renderer params from ckpt: {len(renderer_sd)} tensors "
+                    f"(missing={len(missing)}, unexpected={len(unexpected)})"
+                )
+                # 디버그로 MLP만 몇 개 들어왔는지 확인
+                mlp_keys = [k for k in renderer_sd.keys() if k.startswith("mlp_model.")]
+                print(f"[init] renderer mlp_model tensors: {len(mlp_keys)}")
+
+            else:
+                # (B) renderer prefix가 다른 케이스: mlp_model만 직접 찾아보기
+                mlp_sd = {}
+                for k, v in sd.items():
+                    if k.startswith("renderer.mlp_model."):
+                        mlp_sd[k[len("renderer.mlp_model."):]] = v
+                if self.renderer is not None and hasattr(self.renderer, "mlp_model") and self.renderer.mlp_model is not None and len(mlp_sd) > 0:
+                    missing, unexpected = self.renderer.mlp_model.load_state_dict(mlp_sd, strict=False)
+                    print(
+                        f"[init] loaded ONLY mlp_model params from ckpt: {len(mlp_sd)} tensors "
+                        f"(missing={len(missing)}, unexpected={len(unexpected)})"
+                    )
+                else:
+                    print("[init] no renderer/mlp params found in ckpt; renderer stays freshly initialized")
+
+        print(
+            f"initialize from {load_from}: sh_degree={self.gaussian_model.max_sh_degree}, "
+            f"overwrite_config={self.hparams['overwrite_config']}"
+        )
 
     def setup(self, stage: str):
         if stage == "fit":
@@ -199,7 +232,7 @@ class GaussianSplatting(LightningModule):
                     lambda_mono=0.2,
             
                 ).to(self.device)
-       # self.adaptive_loss_fn = None
+        #self.adaptive_loss_fn = None
 
 
 
@@ -389,43 +422,17 @@ class GaussianSplatting(LightningModule):
         metrics, prog_bar = self.metric.get_train_metrics(self, self.gaussian_model, global_step, batch, outputs)
         
 
-        if (global_step % 1000) == 0 and getattr(self, "global_rank", 0) == 0:
-            sh_weights = outputs.get("sh_weights", None)
-            shs_raw    = outputs.get("shs_raw", None)
-            shs_gated  = outputs.get("shs_gated", None)
 
-            if torch.is_tensor(shs_raw) and torch.is_tensor(shs_gated):
-
-                try:
-                    same_ptr = (shs_raw.data_ptr() == shs_gated.data_ptr())
-                    print(f"[gate_check] step={global_step} same_ptr={same_ptr}")
-                except Exception:
-                    pass
-
-                if shs_raw.shape[-1] == 3:      # [N,K,3]
-                    diff_hi = (shs_gated[:, 1:, :] - shs_raw[:, 1:, :]).abs().mean().item()
-                else:                            # [N,3,K]
-                    diff_hi = (shs_gated[:, :, 1:] - shs_raw[:, :, 1:]).abs().mean().item()
-
-                print(f"[gate_check] step={global_step} sh_diff_hi_mean={diff_hi:.3e}")
-            else:
-                print(f"[gate_check] step={global_step} shs_raw/gated missing")
-
-            if torch.is_tensor(sh_weights):
-                w = sh_weights.detach()
-                print(f"[w_stats] step={global_step} mean={w.mean().item():.3f} "
-                    f"min={w.min().item():.3f} max={w.max().item():.3f} "
-                    f"abs(mean-1)={ (w-1).abs().mean().item():.3f}")
-
-
-          
+        sh_weights = outputs.get("sh_weights", None)
+        shs_raw    = outputs.get("shs_raw", None)
+               
         can_adapt = (
             "adaptive_sh_info" in outputs
             and "sh_weights" in outputs
             and ("shs_raw" in outputs)   
         )
-        if hasattr(self, "adaptive_loss_fn") and can_adapt:
-        #if (self.adaptive_loss_fn is not None) and can_adapt:
+
+        if (self.adaptive_loss_fn is not None) and can_adapt:
 
             base_l_rgb = metrics["loss"]          # photometric(base)
             shs_raw = outputs["shs_raw"]         
@@ -442,8 +449,7 @@ class GaussianSplatting(LightningModule):
                 distances=distances,
                 gaussian_pos=gaussian_pos
             )
-
-
+            
             metrics["loss"] = adaptive_losses["total_loss"]
 
 
@@ -458,7 +464,6 @@ class GaussianSplatting(LightningModule):
             prog_bar.update({
                 "L_RGB": False, "L_SH_ratio": False, "L_gate": False, "L_TV": False, "L_mono": False
             })
-
             
 
         self.log_metrics(metrics, prog_bar, prefix="train", on_step=True, on_epoch=False)
@@ -692,6 +697,14 @@ class GaussianSplatting(LightningModule):
 
     def on_test_epoch_start(self) -> None:
         super().on_test_epoch_start()
+        # try:
+        #     self.hparams["save_val_output"] = True
+        # except Exception:
+        #     # hparams가 immutable이면 우회
+        #     self.save_val_output = True
+
+        # print("DEBUG(save_val_output) =", self.hparams.get("save_val_output", None), getattr(self, "save_val_output", None))
+        # print("DEBUG(output_path) =", self.hparams["output_path"])
         self.on_validation_epoch_start()
 
     def on_test_epoch_end(self) -> None:
